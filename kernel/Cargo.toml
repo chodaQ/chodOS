@@ -1,0 +1,39 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+
+# ==================== 의존성 ====================
+
+[dependencies]
+# limine 부트로더 프로토콜 구조체 정의.
+# 부트로더가 커널에 전달하는 정보(메모리맵, 프레임버퍼 등)의
+# Rust 타입 래퍼를 제공함.
+# 최신 버전 확인: https://crates.io/crates/limine
+limine = "0.6"
+# 커널 힙 할당자: no_std 환경에서 동작하는 연결 리스트 기반 자유 공간 관리자.
+# Box/Vec 등 alloc 크레이트 타입을 사용하려면 #[global_allocator]가 필요함.
+linked_list_allocator = "0.10"
+# 스핀락(spinlock) 기반 동기화 원시 타입 (no_std 지원).
+# VFS 노드의 내부 가변성(interior mutability) 및 글로벌 상태 보호에 사용.
+spin = "0.9"
+# no_std 호환 ext4/ext2 읽기 전용 드라이버 (ALPHA 8)
+# default-features = false → no_std 모드
+ext4-view = { version = "0.9", default-features = false }
+
+# ==================== 프로필 설정 ====================
+
+[profile.dev]
+# 패닉 시 스택 언와인딩(unwinding) 대신 즉시 abort.
+# 언와인딩은 런타임 지원이 필요한데, 커널 초기화 단계에서는 없음.
+panic = "abort"
+# 최소 최적화: 없으면 디버그 빌드가 너무 커서 부팅이 느려질 수 있음
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+# Link-Time Optimization: 링크 단계에서 크로스-크레이트 최적화
+# 커널 바이너리 크기 감소 + 성능 향상
+lto = true
+codegen-units = 1  # LTO 효과를 극대화하기 위해 1로 설정

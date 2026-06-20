@@ -1,0 +1,32 @@
+# .cargo/config.toml
+# 이 패키지(kernel/)에만 적용되는 cargo 설정.
+
+[build]
+# x86_64-unknown-none:
+#   x86_64   = 아키텍처
+#   unknown  = 벤더 없음
+#   none     = OS 없음 (베어메탈)
+# 이 타겟은 std가 없으므로 모든 코드는 no_std여야 함
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = [
+    # 커스텀 링커 스크립트 지정.
+    # 커널 섹션(.text, .rodata, .bss 등)의 메모리 배치를 우리가 직접 제어함.
+    # 경로는 Cargo.toml 기준 상대경로 (kernel/ 디렉토리)
+    "-C", "link-arg=-Tlinker.ld",
+
+    # PIE(Position Independent Executable) 활성화.
+    # limine 부트로더는 커널을 임의 주소에 로드할 수 있어야 함.
+    # PIE가 없으면 절대 주소를 쓰므로, 예상과 다른 주소에 로드되면 즉시 크래시.
+    "-C", "relocation-model=pie",
+]
+
+# build-std: no_std 환경에서 core 라이브러리를 소스에서 직접 빌드.
+# 왜 소스 빌드? 타겟(x86_64-unknown-none)에 맞는 사전 컴파일 바이너리가 없기 때문.
+# compiler_builtins: memcpy, memset 등 컴파일러가 내부적으로 쓰는 런타임 함수
+[unstable]
+# "alloc" 추가: Box, Vec, String 등 힙 기반 타입을 쓰기 위한 크레이트.
+# 커널 힙(#[global_allocator])이 초기화된 후에만 실제로 할당이 가능함.
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]

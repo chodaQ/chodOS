@@ -1,0 +1,13 @@
+# rust-toolchain.toml
+# 이 파일이 있는 디렉토리에서 cargo 실행 시 자동으로 nightly 툴체인을 사용함.
+# rustup이 자동으로 다운로드/설치까지 해줌.
+
+[toolchain]
+channel = "nightly"
+
+# rust-src: no_std 환경에서 core/compiler_builtins를 소스에서 빌드하기 위해 필요
+# llvm-tools-preview: 링킹, 오브젝트 덤프 등 LLVM 도구 모음
+components = ["rust-src", "llvm-tools-preview"]
+
+# 크로스컴파일 타겟: x86_64 베어메탈 (OS 없음, C 런타임 없음)
+targets = ["x86_64-unknown-none"]

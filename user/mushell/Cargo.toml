@@ -1,0 +1,18 @@
+[package]
+name = "mushell"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mushell"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"        # 크기 최적화
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"

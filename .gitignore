@@ -1,0 +1,28 @@
+# Rust 빌드 결과물
+/target/
+**/*.rs.bk
+
+# 컴파일된 라이브러리 및 실행 파일
+*.o
+*.a
+*.so
+*.elf
+*.bin
+*.iso
+*.img
+
+# IDE 설정 (VS Code 등)
+.vscode/
+.idea/
+
+# 시스템 파일
+.DS_Store
+Thumbs.db
+
+# 로그 및 덤프 파일
+*.log
+*.dump
+
+# 커널 이미지나 디스크 이미지 (용량이 크다면 제외)
+# *.disk
+# *.kernel

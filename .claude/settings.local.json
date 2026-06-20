@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build *)",
+      "Bash(cargo search *)",
+      "Bash(make)",
+      "Bash(rustc --print target-spec-json --target x86_64-unknown-none)",
+      "Bash(rustc +nightly --print target-spec-json --target x86_64-unknown-none)",
+      "Bash(python3 -m json.tool)",
+      "Bash(rustc --print target-spec-json --target x86_64-unknown-none -Z unstable-options)",
+      "Bash(timeout 25 make run)",
+      "Bash(make build *)",
+      "Bash(timeout 15 qemu-system-x86_64 -M q35 -cdrom build/mukernel.iso -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/Cellar/qemu/11.0.0/share/qemu/edk2-x86_64-code.fd -serial stdio -m 256M -no-reboot -no-shutdown -display none)",
+      "Read(//Users/a.../Desktop/**)",
+      "Bash(make iso *)",
+      "Bash(make all *)",
+      "Bash(objdump -d /Users/a.../Desktop/무무무무제폴더/kernel/target/x86_64-unknown-none/debug/kernel)",
+      "Bash(make kernel *)",
+      "Bash(brew list *)",
+      "Bash(objdump -d --disassemble=_ZN6kernel11proc_sender17h kernel/target/x86_64-unknown-none/debug/kernel)",
+      "Bash(objdump -d kernel/target/x86_64-unknown-none/debug/kernel)",
+      "Bash(nm kernel/target/x86_64-unknown-none/debug/kernel)",
+      "Bash(objdump -d --start-address=0xffffffff8000c960 --stop-address=0xffffffff8000c9c0 kernel/target/x86_64-unknown-none/debug/kernel)"
+    ]
+  }
+}
