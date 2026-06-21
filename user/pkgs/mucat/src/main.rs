@@ -29,13 +29,13 @@ unsafe fn sys_write(fd: i64, buf: *const u8, len: usize) -> i64 {
     ret
 }
 
-// SYS_PKG_GETARGS = 201: 현재 패키지에 전달된 args (파일 경로)
+// SYS_PKG_GETARGS = 401: 현재 패키지에 전달된 args (파일 경로)
 #[inline(always)]
 unsafe fn sys_pkg_getargs(buf: *mut u8, len: usize) -> i64 {
     let ret: i64;
     core::arch::asm!(
         "int 0x80",
-        inlateout("rax") 201i64 => ret,
+        inlateout("rax") 401i64 => ret,
         in("rdi") buf,
         in("rsi") len,
         options(nostack),
@@ -43,14 +43,14 @@ unsafe fn sys_pkg_getargs(buf: *mut u8, len: usize) -> i64 {
     ret
 }
 
-// SYS_EXT4_READ = 202: ext4 이미지에서 파일 읽기
+// SYS_EXT4_READ = 402: ext4 이미지에서 파일 읽기
 // (path, buf, max_len) → 읽은 바이트 수 또는 -2(ENOENT)
 #[inline(always)]
 unsafe fn sys_ext4_read(path: *const u8, buf: *mut u8, len: usize) -> i64 {
     let ret: i64;
     core::arch::asm!(
         "int 0x80",
-        inlateout("rax") 202i64 => ret,
+        inlateout("rax") 402i64 => ret,
         in("rdi") path,
         in("rsi") buf,
         in("rdx") len,

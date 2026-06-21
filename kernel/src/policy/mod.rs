@@ -217,9 +217,9 @@ pub fn init() {
 }
 
 pub fn register_pid(pid: Pid) {
-    unsafe { ENGINE.register(pid); }
+    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).register(pid); }
 }
 
 pub fn on_switch(from: Pid, to: Pid, tick: u64) {
-    unsafe { ENGINE.on_switch(from, to, tick); }
+    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).on_switch(from, to, tick); }
 }

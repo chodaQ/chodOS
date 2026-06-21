@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CMD_PORT","DATA_PORT"],"fn":["cmd","handle_irq","init","mouse_send","on_click","process_packet","read_data","wait_read","wait_write","write_data"],"static":["MOUSE_BTN","MOUSE_X","MOUSE_Y","PKT","PKT_IDX","PREV_BTN","READY"]};

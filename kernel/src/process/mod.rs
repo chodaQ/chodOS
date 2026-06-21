@@ -48,6 +48,7 @@ pub mod handle;
 pub mod ipc;
 pub mod ipc_cap;
 pub mod scheduler;
+pub mod userproc; // BETA 9: fork/exec/wait4
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -178,9 +179,9 @@ impl Process {
             // rbx에 stack_top을 미리 적어 두어 process_start에서 명시적으로 RSP를 교정.
             *frame.add(5) = stack_top;
             // 인덱스 14 = rax: entry_fn 주소 (트램폴린이 `jmp rax`로 진입)
-            *frame.add(14) = entry_fn as u64;
+            *frame.add(14) = entry_fn as *const () as u64;
             // 인덱스 15 = RIP: process_start 트램폴린 (iretq가 여기로 점프)
-            *frame.add(15) = process_start as u64;
+            *frame.add(15) = process_start as *const () as u64;
             // 인덱스 16 = CS: 커널 코드 세그먼트 (DPL=0)
             *frame.add(16) = KERNEL_CODE_SEL as u64;
             // 인덱스 17 = RFLAGS: 인터럽트 활성(IF=1), 다른 비트는 기본값

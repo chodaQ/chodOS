@@ -1,6 +1,6 @@
-/Users/a.../Desktop/무무무무제폴더/kernel/target/x86_64-unknown-none/debug/deps/kernel-6fc18c27cba342e7.d: src/main.rs src/elf.rs src/fb.rs src/interrupts/mod.rs src/interrupts/gdt.rs src/interrupts/handlers.rs src/interrupts/idt.rs src/interrupts/pic.rs src/kbd.rs src/mouse.rs src/memory/mod.rs src/memory/frame.rs src/memory/heap.rs src/pkg.rs src/net/mod.rs src/net/arp.rs src/net/checksum.rs src/net/icmp.rs src/net/ipv4.rs src/net/udp.rs src/paging/mod.rs src/pci.rs src/policy/mod.rs src/process/mod.rs src/process/context.rs src/process/handle.rs src/process/ipc.rs src/process/ipc_cap.rs src/process/scheduler.rs src/serial.rs src/syscall/mod.rs src/syscall/fs.rs src/syscall/proc.rs src/syscall/mem.rs src/syscall/sysinfo.rs src/vfs/mod.rs src/vfs/ext4fs.rs src/vfs/tmpfs.rs src/virtio/mod.rs src/virtio/blk.rs src/virtio/net.rs src/virtio/queue.rs src/wm.rs /Users/a.../Desktop/무무무무제폴더/kernel/../build/font8x8.bin /Users/a.../Desktop/무무무무제폴더/kernel/../build/sysinfo.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/muecho.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/mucat.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/mushell.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/rootfs.ext4
+/Users/a.../Desktop/무무무무제폴더/kernel/target/x86_64-unknown-none/debug/deps/kernel-6fc18c27cba342e7.d: src/main.rs src/elf.rs src/fb.rs src/interrupts/mod.rs src/interrupts/gdt.rs src/interrupts/handlers.rs src/interrupts/idt.rs src/interrupts/pic.rs src/kbd.rs src/mouse.rs src/memory/mod.rs src/memory/frame.rs src/memory/heap.rs src/pkg.rs src/net/mod.rs src/net/arp.rs src/net/checksum.rs src/net/icmp.rs src/net/ipv4.rs src/net/udp.rs src/paging/mod.rs src/pci.rs src/policy/mod.rs src/process/mod.rs src/process/context.rs src/process/handle.rs src/process/ipc.rs src/process/ipc_cap.rs src/process/scheduler.rs src/process/userproc.rs src/serial.rs src/signal.rs src/smp.rs src/syscall/mod.rs src/syscall/dev.rs src/syscall/fd.rs src/syscall/fs.rs src/syscall/mem.rs src/syscall/pipe.rs src/syscall/proc.rs src/syscall/sock.rs src/syscall/sysinfo.rs src/term.rs src/vfs/mod.rs src/vfs/ext4fs.rs src/vfs/procfs.rs src/vfs/tmpfs.rs src/virtio/mod.rs src/virtio/blk.rs src/virtio/net.rs src/virtio/queue.rs src/wm.rs /Users/a.../Desktop/무무무무제폴더/kernel/../build/font8x8.bin /Users/a.../Desktop/무무무무제폴더/kernel/../build/sysinfo.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/muecho.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/mucat.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/muls.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/mupwd.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/musl_hello.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/musl_uname.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/mushell.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/rootfs.ext4
 
-/Users/a.../Desktop/무무무무제폴더/kernel/target/x86_64-unknown-none/debug/deps/kernel-6fc18c27cba342e7: src/main.rs src/elf.rs src/fb.rs src/interrupts/mod.rs src/interrupts/gdt.rs src/interrupts/handlers.rs src/interrupts/idt.rs src/interrupts/pic.rs src/kbd.rs src/mouse.rs src/memory/mod.rs src/memory/frame.rs src/memory/heap.rs src/pkg.rs src/net/mod.rs src/net/arp.rs src/net/checksum.rs src/net/icmp.rs src/net/ipv4.rs src/net/udp.rs src/paging/mod.rs src/pci.rs src/policy/mod.rs src/process/mod.rs src/process/context.rs src/process/handle.rs src/process/ipc.rs src/process/ipc_cap.rs src/process/scheduler.rs src/serial.rs src/syscall/mod.rs src/syscall/fs.rs src/syscall/proc.rs src/syscall/mem.rs src/syscall/sysinfo.rs src/vfs/mod.rs src/vfs/ext4fs.rs src/vfs/tmpfs.rs src/virtio/mod.rs src/virtio/blk.rs src/virtio/net.rs src/virtio/queue.rs src/wm.rs /Users/a.../Desktop/무무무무제폴더/kernel/../build/font8x8.bin /Users/a.../Desktop/무무무무제폴더/kernel/../build/sysinfo.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/muecho.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/mucat.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/mushell.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/rootfs.ext4
+/Users/a.../Desktop/무무무무제폴더/kernel/target/x86_64-unknown-none/debug/deps/kernel-6fc18c27cba342e7: src/main.rs src/elf.rs src/fb.rs src/interrupts/mod.rs src/interrupts/gdt.rs src/interrupts/handlers.rs src/interrupts/idt.rs src/interrupts/pic.rs src/kbd.rs src/mouse.rs src/memory/mod.rs src/memory/frame.rs src/memory/heap.rs src/pkg.rs src/net/mod.rs src/net/arp.rs src/net/checksum.rs src/net/icmp.rs src/net/ipv4.rs src/net/udp.rs src/paging/mod.rs src/pci.rs src/policy/mod.rs src/process/mod.rs src/process/context.rs src/process/handle.rs src/process/ipc.rs src/process/ipc_cap.rs src/process/scheduler.rs src/process/userproc.rs src/serial.rs src/signal.rs src/smp.rs src/syscall/mod.rs src/syscall/dev.rs src/syscall/fd.rs src/syscall/fs.rs src/syscall/mem.rs src/syscall/pipe.rs src/syscall/proc.rs src/syscall/sock.rs src/syscall/sysinfo.rs src/term.rs src/vfs/mod.rs src/vfs/ext4fs.rs src/vfs/procfs.rs src/vfs/tmpfs.rs src/virtio/mod.rs src/virtio/blk.rs src/virtio/net.rs src/virtio/queue.rs src/wm.rs /Users/a.../Desktop/무무무무제폴더/kernel/../build/font8x8.bin /Users/a.../Desktop/무무무무제폴더/kernel/../build/sysinfo.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/muecho.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/mucat.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/muls.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/mupwd.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/musl_hello.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/musl_uname.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/mushell.elf /Users/a.../Desktop/무무무무제폴더/kernel/../build/rootfs.ext4
 
 src/main.rs:
 src/elf.rs:
@@ -31,14 +31,23 @@ src/process/handle.rs:
 src/process/ipc.rs:
 src/process/ipc_cap.rs:
 src/process/scheduler.rs:
+src/process/userproc.rs:
 src/serial.rs:
+src/signal.rs:
+src/smp.rs:
 src/syscall/mod.rs:
+src/syscall/dev.rs:
+src/syscall/fd.rs:
 src/syscall/fs.rs:
-src/syscall/proc.rs:
 src/syscall/mem.rs:
+src/syscall/pipe.rs:
+src/syscall/proc.rs:
+src/syscall/sock.rs:
 src/syscall/sysinfo.rs:
+src/term.rs:
 src/vfs/mod.rs:
 src/vfs/ext4fs.rs:
+src/vfs/procfs.rs:
 src/vfs/tmpfs.rs:
 src/virtio/mod.rs:
 src/virtio/blk.rs:
@@ -49,6 +58,10 @@ src/wm.rs:
 /Users/a.../Desktop/무무무무제폴더/kernel/../build/sysinfo.elf:
 /Users/a.../Desktop/무무무무제폴더/kernel/../build/muecho.elf:
 /Users/a.../Desktop/무무무무제폴더/kernel/../build/mucat.elf:
+/Users/a.../Desktop/무무무무제폴더/kernel/../build/muls.elf:
+/Users/a.../Desktop/무무무무제폴더/kernel/../build/mupwd.elf:
+/Users/a.../Desktop/무무무무제폴더/kernel/../build/musl_hello.elf:
+/Users/a.../Desktop/무무무무제폴더/kernel/../build/musl_uname.elf:
 /Users/a.../Desktop/무무무무제폴더/kernel/../build/mushell.elf:
 /Users/a.../Desktop/무무무무제폴더/kernel/../build/rootfs.ext4:
 

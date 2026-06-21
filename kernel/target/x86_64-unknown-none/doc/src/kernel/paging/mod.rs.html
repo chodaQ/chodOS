@@ -1,0 +1,472 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/paging/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="kernel" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0-nightly (cb40c25f6 2026-05-04)" data-channel="nightly" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-aa4d37ac.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">kernel/paging/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! 페이징 서브시스템 (Paging Subsystem)
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! ## x86_64 4단계 페이지 테이블 구조
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! 가상 주소 48비트 분해:
+<a href=#6 id=6 data-nosnippet>6</a>//! ```
+<a href=#7 id=7 data-nosnippet>7</a>//! [63:48] 부호 확장 (반드시 비트47의 복사본)
+<a href=#8 id=8 data-nosnippet>8</a>//! [47:39] PML4 인덱스 (9비트, 0-511)
+<a href=#9 id=9 data-nosnippet>9</a>//! [38:30] PDPT  인덱스 (9비트, 0-511)
+<a href=#10 id=10 data-nosnippet>10</a>//! [29:21] PD    인덱스 (9비트, 0-511)
+<a href=#11 id=11 data-nosnippet>11</a>//! [20:12] PT    인덱스 (9비트, 0-511)
+<a href=#12 id=12 data-nosnippet>12</a>//! [11:0]  페이지 내 오프셋 (12비트 = 4KB)
+<a href=#13 id=13 data-nosnippet>13</a>//! ```
+<a href=#14 id=14 data-nosnippet>14</a>//!
+<a href=#15 id=15 data-nosnippet>15</a>//! 각 테이블: 512 × 8바이트 = 4096바이트 (= 1 프레임)
+<a href=#16 id=16 data-nosnippet>16</a>//! PML4 → PDPT → PD → PT → 4KB 물리 프레임
+<a href=#17 id=17 data-nosnippet>17</a>//!
+<a href=#18 id=18 data-nosnippet>18</a>//! ## 주소 공간 분할
+<a href=#19 id=19 data-nosnippet>19</a>//!
+<a href=#20 id=20 data-nosnippet>20</a>//! ```
+<a href=#21 id=21 data-nosnippet>21</a>//! 0x0000_0000_0000_0000  ← 유저 공간 시작
+<a href=#22 id=22 data-nosnippet>22</a>//! ...
+<a href=#23 id=23 data-nosnippet>23</a>//! 0x0000_7FFF_FFFF_FFFF  ← 유저 공간 끝 (PML4[0..255])
+<a href=#24 id=24 data-nosnippet>24</a>//! [canonical hole]
+<a href=#25 id=25 data-nosnippet>25</a>//! 0xFFFF_8000_0000_0000  ← 커널 공간 시작 (PML4[256..511])
+<a href=#26 id=26 data-nosnippet>26</a>//! ...                       HHDM, 커널 코드/데이터
+<a href=#27 id=27 data-nosnippet>27</a>//! 0xFFFF_FFFF_FFFF_FFFF
+<a href=#28 id=28 data-nosnippet>28</a>//! ```
+<a href=#29 id=29 data-nosnippet>29</a>//!
+<a href=#30 id=30 data-nosnippet>30</a>//! ## Milestone 3.6 구현 범위
+<a href=#31 id=31 data-nosnippet>31</a>//!
+<a href=#32 id=32 data-nosnippet>32</a>//! - 커널 PML4: limine PML4의 상위 절반(인덱스 256-511) 복사 후 CR3 전환
+<a href=#33 id=33 data-nosnippet>33</a>//! - 유저 PML4: 커널 절반 공유 + 유저 코드/스택 매핑
+<a href=#34 id=34 data-nosnippet>34</a>//! - ring3 진입: IRETQ로 CPL 0 → CPL 3 전환
+<a href=#35 id=35 data-nosnippet>35</a>//! - Syscall:    `int 0x80` → ring3 → ring0 → IRETQ ring3 복귀
+<a href=#36 id=36 data-nosnippet>36</a>//! - Longjmp:    3회 syscall 후 커널 메인으로 복귀
+<a href=#37 id=37 data-nosnippet>37</a>
+<a href=#38 id=38 data-nosnippet>38</a></span><span class="kw">use </span>core::arch::asm;
+<a href=#39 id=39 data-nosnippet>39</a><span class="kw">use </span>core::sync::atomic::{AtomicU32, Ordering};
+<a href=#40 id=40 data-nosnippet>40</a><span class="kw">use </span><span class="kw">crate</span>::memory::{frame, hhdm_offset};
+<a href=#41 id=41 data-nosnippet>41</a><span class="kw">use </span><span class="kw">crate</span>::interrupts::gdt;
+<a href=#42 id=42 data-nosnippet>42</a>
+<a href=#43 id=43 data-nosnippet>43</a><span class="comment">// ── 페이지 테이블 엔트리 플래그 ──────────────────────────────────────────────
+<a href=#44 id=44 data-nosnippet>44</a></span><span class="kw">const </span>PTE_PRESENT:  u64 = <span class="number">1 </span>&lt;&lt; <span class="number">0</span>; <span class="comment">// 페이지가 물리 메모리에 존재
+<a href=#45 id=45 data-nosnippet>45</a></span><span class="kw">const </span>PTE_WRITABLE: u64 = <span class="number">1 </span>&lt;&lt; <span class="number">1</span>; <span class="comment">// 쓰기 허용
+<a href=#46 id=46 data-nosnippet>46</a></span><span class="kw">const </span>PTE_USER:     u64 = <span class="number">1 </span>&lt;&lt; <span class="number">2</span>; <span class="comment">// ring3 접근 허용 (U/S 비트)
+<a href=#47 id=47 data-nosnippet>47</a>// bit 7 = PS(Page Size): PD에서 1이면 2MB 거대 페이지 (현재 미사용)
+<a href=#48 id=48 data-nosnippet>48</a>
+<a href=#49 id=49 data-nosnippet>49</a>// ── 유저 프로세스 가상 주소 레이아웃 ─────────────────────────────────────────
+<a href=#50 id=50 data-nosnippet>50</a></span><span class="doccomment">/// 유저 코드가 매핑되는 가상 주소 (64KB)
+<a href=#51 id=51 data-nosnippet>51</a></span><span class="kw">const </span>USER_CODE_VADDR: u64 = <span class="number">0x0000_0000_1_0000</span>;
+<a href=#52 id=52 data-nosnippet>52</a><span class="doccomment">/// 유저 스택 최상단 주소 (1MB, 스택은 아래 방향으로 성장)
+<a href=#53 id=53 data-nosnippet>53</a></span><span class="kw">const </span>USER_STACK_TOP:  u64 = <span class="number">0x0000_0000_10_0000</span>;
+<a href=#54 id=54 data-nosnippet>54</a><span class="doccomment">/// 유저 스택에 할당할 4KB 프레임 수 (= 16KB 스택)
+<a href=#55 id=55 data-nosnippet>55</a></span><span class="kw">const </span>USER_STACK_PAGES: usize = <span class="number">4</span>;
+<a href=#56 id=56 data-nosnippet>56</a>
+<a href=#57 id=57 data-nosnippet>57</a><span class="comment">// ── 전역 상태 ─────────────────────────────────────────────────────────────
+<a href=#58 id=58 data-nosnippet>58</a></span><span class="doccomment">/// 커널 전용 페이지 테이블의 CR3 값 (유저 모드 복귀 시 CR3 복원에 사용)
+<a href=#59 id=59 data-nosnippet>59</a></span><span class="kw">pub static </span><span class="kw-2">mut </span>KERNEL_CR3: u64 = <span class="number">0</span>;
+<a href=#60 id=60 data-nosnippet>60</a>
+<a href=#61 id=61 data-nosnippet>61</a><span class="doccomment">/// enter_user_demo() 진입 직전에 저장한 커널 메인 스택 포인터
+<a href=#62 id=62 data-nosnippet>62</a>///
+<a href=#63 id=63 data-nosnippet>63</a>/// syscall 핸들러가 3회 호출 후 이 값으로 RSP를 복원 (longjmp).
+<a href=#64 id=64 data-nosnippet>64</a></span><span class="kw">pub static </span><span class="kw-2">mut </span>KERNEL_MAIN_RSP: u64 = <span class="number">0</span>;
+<a href=#65 id=65 data-nosnippet>65</a>
+<a href=#66 id=66 data-nosnippet>66</a><span class="doccomment">/// ring3 → ring0 인터럽트/예외 진입 시 CPU가 사용할 전용 스택
+<a href=#67 id=67 data-nosnippet>67</a>///
+<a href=#68 id=68 data-nosnippet>68</a>/// CPU는 ring3에서 인터럽트 발생 시 TSS.RSP0에 설정된 주소로 스택을 전환함.
+<a href=#69 id=69 data-nosnippet>69</a>/// 이 버퍼의 최상단(+8192)이 TSS.RSP0에 설정됨.
+<a href=#70 id=70 data-nosnippet>70</a></span><span class="kw">static </span><span class="kw-2">mut </span>USER_KERNEL_STACK: [u8; <span class="number">8192</span>] = [<span class="number">0</span>; <span class="number">8192</span>];
+<a href=#71 id=71 data-nosnippet>71</a>
+<a href=#72 id=72 data-nosnippet>72</a><span class="comment">// ── 페이지 테이블 타입 ────────────────────────────────────────────────────
+<a href=#73 id=73 data-nosnippet>73</a></span><span class="doccomment">/// x86_64 페이지 테이블 (PML4 / PDPT / PD / PT 모두 동일 구조)
+<a href=#74 id=74 data-nosnippet>74</a>///
+<a href=#75 id=75 data-nosnippet>75</a>/// `#[repr(C, align(4096))]`: 4KB 경계 정렬 필수 (CR3 로드 요구사항).
+<a href=#76 id=76 data-nosnippet>76</a>/// 할당 후 반드시 0으로 초기화해야 함 (비어있음 = Not Present = 0).
+<a href=#77 id=77 data-nosnippet>77</a></span><span class="attr">#[repr(C, align(<span class="number">4096</span>))]
+<a href=#78 id=78 data-nosnippet>78</a></span><span class="kw">struct </span>PageTable([u64; <span class="number">512</span>]);
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a><span class="doccomment">/// 물리 프레임을 할당하고 0으로 초기화한 PageTable 포인터 반환
+<a href=#81 id=81 data-nosnippet>81</a>///
+<a href=#82 id=82 data-nosnippet>82</a>/// 반환값: 가상 주소(HHDM) 기반 포인터 (물리 주소 + HHDM 오프셋)
+<a href=#83 id=83 data-nosnippet>83</a></span><span class="kw">fn </span>alloc_table() -&gt; <span class="kw-2">*mut </span>PageTable {
+<a href=#84 id=84 data-nosnippet>84</a>    <span class="kw">let </span>phys = frame::alloc_frame().expect(<span class="string">"OOM: page table frame"</span>);
+<a href=#85 id=85 data-nosnippet>85</a>    <span class="kw">let </span>virt = phys + hhdm_offset();
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="kw">unsafe </span>{
+<a href=#87 id=87 data-nosnippet>87</a>        <span class="comment">// 새 페이지 테이블은 반드시 0으로 채워야 함
+<a href=#88 id=88 data-nosnippet>88</a>        // (0 = Present 비트 클리어 = 해당 엔트리 미사용)
+<a href=#89 id=89 data-nosnippet>89</a>        </span>core::ptr::write_bytes(virt <span class="kw">as </span><span class="kw-2">*mut </span>u8, <span class="number">0</span>, <span class="number">4096</span>);
+<a href=#90 id=90 data-nosnippet>90</a>        virt <span class="kw">as </span><span class="kw-2">*mut </span>PageTable
+<a href=#91 id=91 data-nosnippet>91</a>    }
+<a href=#92 id=92 data-nosnippet>92</a>}
+<a href=#93 id=93 data-nosnippet>93</a>
+<a href=#94 id=94 data-nosnippet>94</a><span class="doccomment">/// 물리 주소 → 가상 주소(HHDM) 기반 PageTable 가변 참조
+<a href=#95 id=95 data-nosnippet>95</a></span><span class="kw">unsafe fn </span>table_at(phys: u64) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span><span class="kw-2">mut </span>PageTable {
+<a href=#96 id=96 data-nosnippet>96</a>    <span class="kw-2">&amp;mut *</span>((phys + hhdm_offset()) <span class="kw">as </span><span class="kw-2">*mut </span>PageTable)
+<a href=#97 id=97 data-nosnippet>97</a>}
+<a href=#98 id=98 data-nosnippet>98</a>
+<a href=#99 id=99 data-nosnippet>99</a><span class="doccomment">/// 가상 주소를 4KB 물리 페이지에 매핑
+<a href=#100 id=100 data-nosnippet>100</a>///
+<a href=#101 id=101 data-nosnippet>101</a>/// PML4 → PDPT → PD → PT 계층을 순서대로 탐색.
+<a href=#102 id=102 data-nosnippet>102</a>/// 중간 테이블이 없으면 새 프레임을 할당해 생성.
+<a href=#103 id=103 data-nosnippet>103</a>///
+<a href=#104 id=104 data-nosnippet>104</a>/// # 인수
+<a href=#105 id=105 data-nosnippet>105</a>/// - `pml4`: 루트 페이지 테이블 (가상 주소 포인터)
+<a href=#106 id=106 data-nosnippet>106</a>/// - `vaddr`: 매핑할 가상 주소 (4KB 정렬이어야 함)
+<a href=#107 id=107 data-nosnippet>107</a>/// - `paddr`: 매핑할 물리 주소 (4KB 정렬이어야 함)
+<a href=#108 id=108 data-nosnippet>108</a>/// - `flags`: `PTE_WRITABLE`, `PTE_USER` 등 (PTE_PRESENT 자동 추가)
+<a href=#109 id=109 data-nosnippet>109</a></span><span class="kw">pub unsafe fn </span>map_4k(pml4: <span class="kw-2">*mut </span>PageTable, vaddr: u64, paddr: u64, flags: u64) {
+<a href=#110 id=110 data-nosnippet>110</a>    <span class="comment">// 가상 주소를 각 레벨의 9비트 인덱스로 분해
+<a href=#111 id=111 data-nosnippet>111</a>    </span><span class="kw">let </span>i4 = ((vaddr &gt;&gt; <span class="number">39</span>) &amp; <span class="number">0x1FF</span>) <span class="kw">as </span>usize; <span class="comment">// PML4 인덱스
+<a href=#112 id=112 data-nosnippet>112</a>    </span><span class="kw">let </span>i3 = ((vaddr &gt;&gt; <span class="number">30</span>) &amp; <span class="number">0x1FF</span>) <span class="kw">as </span>usize; <span class="comment">// PDPT 인덱스
+<a href=#113 id=113 data-nosnippet>113</a>    </span><span class="kw">let </span>i2 = ((vaddr &gt;&gt; <span class="number">21</span>) &amp; <span class="number">0x1FF</span>) <span class="kw">as </span>usize; <span class="comment">// PD   인덱스
+<a href=#114 id=114 data-nosnippet>114</a>    </span><span class="kw">let </span>i1 = ((vaddr &gt;&gt; <span class="number">12</span>) &amp; <span class="number">0x1FF</span>) <span class="kw">as </span>usize; <span class="comment">// PT   인덱스
+<a href=#115 id=115 data-nosnippet>115</a>
+<a href=#116 id=116 data-nosnippet>116</a>    // 중간 테이블 엔트리에는 PTE_USER를 전파해야 함.
+<a href=#117 id=117 data-nosnippet>117</a>    // U/S 비트는 계층 전체에 AND로 적용되기 때문에
+<a href=#118 id=118 data-nosnippet>118</a>    // 상위 테이블 엔트리에 U/S=0이 있으면 하위 레벨이 U/S=1이어도 supervisor만 접근.
+<a href=#119 id=119 data-nosnippet>119</a>    </span><span class="kw">let </span>mid_flags = PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+<a href=#120 id=120 data-nosnippet>120</a>
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="kw">let </span>pdpt = get_or_create(<span class="kw-2">&amp;mut </span>(<span class="kw-2">*</span>pml4).<span class="number">0</span>[i4], mid_flags);
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="kw">let </span>pd   = get_or_create(<span class="kw-2">&amp;mut </span>(<span class="kw-2">*</span>pdpt).<span class="number">0</span>[i3], mid_flags);
+<a href=#123 id=123 data-nosnippet>123</a>    <span class="kw">let </span>pt   = get_or_create(<span class="kw-2">&amp;mut </span>(<span class="kw-2">*</span>pd).<span class="number">0</span>[i2],   mid_flags);
+<a href=#124 id=124 data-nosnippet>124</a>
+<a href=#125 id=125 data-nosnippet>125</a>    <span class="comment">// 최종 4KB 페이지 매핑 (PTE_PRESENT 자동 추가)
+<a href=#126 id=126 data-nosnippet>126</a>    </span>(<span class="kw-2">*</span>pt).<span class="number">0</span>[i1] = (paddr &amp; !<span class="number">0xFFF</span>) | flags | PTE_PRESENT;
+<a href=#127 id=127 data-nosnippet>127</a>}
+<a href=#128 id=128 data-nosnippet>128</a>
+<a href=#129 id=129 data-nosnippet>129</a><span class="doccomment">/// 페이지 테이블 엔트리가 없으면 새 테이블 할당 후 엔트리에 기록
+<a href=#130 id=130 data-nosnippet>130</a></span><span class="kw">unsafe fn </span>get_or_create(entry: <span class="kw-2">&amp;mut </span>u64, flags: u64) -&gt; <span class="kw-2">*mut </span>PageTable {
+<a href=#131 id=131 data-nosnippet>131</a>    <span class="kw">if </span><span class="kw-2">*</span>entry &amp; PTE_PRESENT == <span class="number">0 </span>{
+<a href=#132 id=132 data-nosnippet>132</a>        <span class="kw">let </span>new_tbl = alloc_table();
+<a href=#133 id=133 data-nosnippet>133</a>        <span class="comment">// 물리 주소 = 가상 주소 - HHDM 오프셋
+<a href=#134 id=134 data-nosnippet>134</a>        </span><span class="kw">let </span>phys = new_tbl <span class="kw">as </span>u64 - hhdm_offset();
+<a href=#135 id=135 data-nosnippet>135</a>        <span class="kw-2">*</span>entry = phys | flags;
+<a href=#136 id=136 data-nosnippet>136</a>    }
+<a href=#137 id=137 data-nosnippet>137</a>    <span class="comment">// 엔트리 상위 52비트 = 물리 주소, 하위 12비트 = 플래그
+<a href=#138 id=138 data-nosnippet>138</a>    </span>table_at(<span class="kw-2">*</span>entry &amp; !<span class="number">0xFFF</span>)
+<a href=#139 id=139 data-nosnippet>139</a>}
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a><span class="comment">// ── 초기화 ───────────────────────────────────────────────────────────────────
+<a href=#142 id=142 data-nosnippet>142</a>
+<a href=#143 id=143 data-nosnippet>143</a></span><span class="doccomment">/// 페이징 서브시스템 초기화
+<a href=#144 id=144 data-nosnippet>144</a>///
+<a href=#145 id=145 data-nosnippet>145</a>/// ## 동작
+<a href=#146 id=146 data-nosnippet>146</a>/// 1. 현재 CR3(limine의 PML4)에서 커널 절반(인덱스 256-511) 복사
+<a href=#147 id=147 data-nosnippet>147</a>/// 2. 새 커널 PML4로 CR3 전환
+<a href=#148 id=148 data-nosnippet>148</a>/// 3. TSS.RSP0 = USER_KERNEL_STACK 최상단
+<a href=#149 id=149 data-nosnippet>149</a>///    (ring3 → ring0 전환 시 CPU가 이 주소로 스택을 자동 교체)
+<a href=#150 id=150 data-nosnippet>150</a>///
+<a href=#151 id=151 data-nosnippet>151</a>/// ## 왜 새 PML4를 만드는가?
+<a href=#152 id=152 data-nosnippet>152</a>/// limine의 PML4를 그대로 쓰면 우리가 유저 공간(인덱스 0-255)을
+<a href=#153 id=153 data-nosnippet>153</a>/// 제어할 수 없음. 새 PML4를 만들어야 프로세스별 유저 매핑을 독립적으로 관리 가능.
+<a href=#154 id=154 data-nosnippet>154</a></span><span class="kw">pub fn </span>init() {
+<a href=#155 id=155 data-nosnippet>155</a>    <span class="kw">unsafe </span>{
+<a href=#156 id=156 data-nosnippet>156</a>        <span class="comment">// 현재 CR3 읽기 (limine이 설정한 PML4의 물리 주소)
+<a href=#157 id=157 data-nosnippet>157</a>        </span><span class="kw">let </span>old_cr3: u64;
+<a href=#158 id=158 data-nosnippet>158</a>        <span class="macro">asm!</span>(<span class="string">"mov {}, cr3"</span>, out(reg) old_cr3,
+<a href=#159 id=159 data-nosnippet>159</a>            options(nomem, nostack, preserves_flags));
+<a href=#160 id=160 data-nosnippet>160</a>
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="comment">// 새 커널 PML4 할당 (유저 절반 0-255는 0으로 비워둠)
+<a href=#162 id=162 data-nosnippet>162</a>        </span><span class="kw">let </span>new_pml4 = alloc_table();
+<a href=#163 id=163 data-nosnippet>163</a>        <span class="kw">let </span>new_cr3  = new_pml4 <span class="kw">as </span>u64 - hhdm_offset();
+<a href=#164 id=164 data-nosnippet>164</a>
+<a href=#165 id=165 data-nosnippet>165</a>        <span class="comment">// limine PML4의 커널 절반(256-511)을 새 PML4에 복사.
+<a href=#166 id=166 data-nosnippet>166</a>        // 이 범위에 HHDM, 커널 코드/데이터, 스택 매핑이 있음.
+<a href=#167 id=167 data-nosnippet>167</a>        </span><span class="kw">let </span>old_pml4 = table_at(old_cr3 &amp; !<span class="number">0xFFF</span>);
+<a href=#168 id=168 data-nosnippet>168</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">256</span>..<span class="number">512usize </span>{
+<a href=#169 id=169 data-nosnippet>169</a>            (<span class="kw-2">*</span>new_pml4).<span class="number">0</span>[i] = old_pml4.<span class="number">0</span>[i];
+<a href=#170 id=170 data-nosnippet>170</a>        }
+<a href=#171 id=171 data-nosnippet>171</a>
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="comment">// CR3 전환 (= TLB 전체 플러시)
+<a href=#173 id=173 data-nosnippet>173</a>        </span><span class="macro">asm!</span>(<span class="string">"mov cr3, {}"</span>, <span class="kw">in</span>(reg) new_cr3,
+<a href=#174 id=174 data-nosnippet>174</a>            options(nomem, nostack, preserves_flags));
+<a href=#175 id=175 data-nosnippet>175</a>
+<a href=#176 id=176 data-nosnippet>176</a>        KERNEL_CR3 = new_cr3;
+<a href=#177 id=177 data-nosnippet>177</a>
+<a href=#178 id=178 data-nosnippet>178</a>        <span class="comment">// TSS.RSP0 설정: ring3에서 인터럽트 발생 시 CPU가 사용할 스택
+<a href=#179 id=179 data-nosnippet>179</a>        // 스택은 높은 주소에서 낮은 방향으로 성장하므로 버퍼 최상단 설정
+<a href=#180 id=180 data-nosnippet>180</a>        </span><span class="kw">let </span>rsp0 = USER_KERNEL_STACK.as_ptr().add(<span class="number">8192</span>) <span class="kw">as </span>u64;
+<a href=#181 id=181 data-nosnippet>181</a>        gdt::set_tss_rsp0(rsp0);
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="kw">crate</span>::interrupts::init_syscall(rsp0);
+<a href=#183 id=183 data-nosnippet>183</a>    }
+<a href=#184 id=184 data-nosnippet>184</a>
+<a href=#185 id=185 data-nosnippet>185</a>    <span class="macro">crate::serial_println!</span>(<span class="string">"[paging] Kernel PML4 built and CR3 switched."</span>);
+<a href=#186 id=186 data-nosnippet>186</a>}
+<a href=#187 id=187 data-nosnippet>187</a>
+<a href=#188 id=188 data-nosnippet>188</a><span class="comment">// ── ring3 진입 ───────────────────────────────────────────────────────────────
+<a href=#189 id=189 data-nosnippet>189</a>
+<a href=#190 id=190 data-nosnippet>190</a></span><span class="doccomment">/// 유저 프로세스 주소 공간 생성 후 ring3으로 진입 (반환하지 않음)
+<a href=#191 id=191 data-nosnippet>191</a>///
+<a href=#192 id=192 data-nosnippet>192</a>/// ## 동작 순서
+<a href=#193 id=193 data-nosnippet>193</a>/// 1. 유저 PML4 생성 (커널 절반 공유)
+<a href=#194 id=194 data-nosnippet>194</a>/// 2. 유저 코드 프레임 할당 → `code` 바이트 복사 → `USER_CODE_VADDR`에 매핑
+<a href=#195 id=195 data-nosnippet>195</a>/// 3. 유저 스택 프레임 할당 → `USER_STACK_TOP` 아래에 매핑
+<a href=#196 id=196 data-nosnippet>196</a>/// 4. 커널 메인 RSP 저장 (longjmp 복귀 지점)
+<a href=#197 id=197 data-nosnippet>197</a>/// 5. CR3 → 유저 PML4, IRETQ → ring3
+<a href=#198 id=198 data-nosnippet>198</a>///
+<a href=#199 id=199 data-nosnippet>199</a>/// ## 유저 코드 규약
+<a href=#200 id=200 data-nosnippet>200</a>/// - 진입점: `USER_CODE_VADDR` (코드 바이트의 오프셋 0)
+<a href=#201 id=201 data-nosnippet>201</a>/// - 스택: `USER_STACK_TOP`에서 시작, 아래로 성장
+<a href=#202 id=202 data-nosnippet>202</a>/// - Syscall: `int 0x80` 사용
+<a href=#203 id=203 data-nosnippet>203</a>///
+<a href=#204 id=204 data-nosnippet>204</a>/// ## 반환
+<a href=#205 id=205 data-nosnippet>205</a>/// 이 함수는 `options(noreturn)` asm으로 끝나며 절대 반환하지 않음.
+<a href=#206 id=206 data-nosnippet>206</a>/// `syscall_handler()`가 3번째 호출 시 longjmp로 `after_user_demo()`에 도달.
+<a href=#207 id=207 data-nosnippet>207</a>/// ELF64 바이너리를 유저 주소 공간에 로드한 뒤 ring3으로 진입 (ALPHA 14)
+<a href=#208 id=208 data-nosnippet>208</a>///
+<a href=#209 id=209 data-nosnippet>209</a>/// ## 동작 순서
+<a href=#210 id=210 data-nosnippet>210</a>/// 1. 유저 PML4 생성 (커널 절반 공유)
+<a href=#211 id=211 data-nosnippet>211</a>/// 2. ELF PT_LOAD 세그먼트별로 물리 프레임 할당 → 파일 내용 복사 → 가상 주소 매핑
+<a href=#212 id=212 data-nosnippet>212</a>/// 3. 유저 스택 할당 (USER_STACK_TOP 아래)
+<a href=#213 id=213 data-nosnippet>213</a>/// 4. KERNEL_MAIN_RSP 저장 (longjmp 복귀 지점)
+<a href=#214 id=214 data-nosnippet>214</a>/// 5. IRETQ → ring3, 진입점 = ELF e_entry
+<a href=#215 id=215 data-nosnippet>215</a></span><span class="kw">pub unsafe fn </span>enter_elf(elf_data: <span class="kw-2">&amp;</span>[u8]) -&gt; ! {
+<a href=#216 id=216 data-nosnippet>216</a>    <span class="kw">use </span><span class="kw">crate</span>::elf::Elf64;
+<a href=#217 id=217 data-nosnippet>217</a>
+<a href=#218 id=218 data-nosnippet>218</a>    <span class="kw">let </span>elf = Elf64::parse(elf_data).expect(<span class="string">"[elf] invalid ELF64 binary"</span>);
+<a href=#219 id=219 data-nosnippet>219</a>    <span class="kw">let </span>entry = elf.entry();
+<a href=#220 id=220 data-nosnippet>220</a>
+<a href=#221 id=221 data-nosnippet>221</a>    <span class="macro">crate::serial_println!</span>(<span class="string">"[elf] ELF64 parsed: entry={:#x}"</span>, entry);
+<a href=#222 id=222 data-nosnippet>222</a>
+<a href=#223 id=223 data-nosnippet>223</a>    <span class="comment">// ── 유저 PML4 ────────────────────────────────────────────────────────
+<a href=#224 id=224 data-nosnippet>224</a>    </span><span class="kw">let </span>user_pml4 = alloc_table();
+<a href=#225 id=225 data-nosnippet>225</a>    <span class="kw">let </span>kpml4 = table_at(KERNEL_CR3 &amp; !<span class="number">0xFFF</span>);
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="kw">for </span>i <span class="kw">in </span><span class="number">256</span>..<span class="number">512usize </span>{
+<a href=#227 id=227 data-nosnippet>227</a>        (<span class="kw-2">*</span>user_pml4).<span class="number">0</span>[i] = kpml4.<span class="number">0</span>[i];
+<a href=#228 id=228 data-nosnippet>228</a>    }
+<a href=#229 id=229 data-nosnippet>229</a>    <span class="kw">let </span>user_cr3 = user_pml4 <span class="kw">as </span>u64 - hhdm_offset();
+<a href=#230 id=230 data-nosnippet>230</a>
+<a href=#231 id=231 data-nosnippet>231</a>    <span class="comment">// ── PT_LOAD 세그먼트 매핑 ────────────────────────────────────────────
+<a href=#232 id=232 data-nosnippet>232</a>    </span><span class="kw">for </span>seg <span class="kw">in </span>elf.load_segments() {
+<a href=#233 id=233 data-nosnippet>233</a>        <span class="macro">crate::serial_println!</span>(
+<a href=#234 id=234 data-nosnippet>234</a>            <span class="string">"[elf] LOAD vaddr={:#x}  filesz={:#x}  memsz={:#x}  flags={:#x}"</span>,
+<a href=#235 id=235 data-nosnippet>235</a>            seg.vaddr, seg.filesz, seg.memsz, seg.flags
+<a href=#236 id=236 data-nosnippet>236</a>        );
+<a href=#237 id=237 data-nosnippet>237</a>
+<a href=#238 id=238 data-nosnippet>238</a>        <span class="comment">// 세그먼트가 차지할 페이지 범위 (4KB 정렬)
+<a href=#239 id=239 data-nosnippet>239</a>        </span><span class="kw">let </span>page_start = seg.vaddr &amp; !<span class="number">0xFFF</span>;
+<a href=#240 id=240 data-nosnippet>240</a>        <span class="kw">let </span>page_end   = (seg.vaddr + seg.memsz <span class="kw">as </span>u64 + <span class="number">0xFFF</span>) &amp; !<span class="number">0xFFF</span>;
+<a href=#241 id=241 data-nosnippet>241</a>
+<a href=#242 id=242 data-nosnippet>242</a>        <span class="comment">// 세그먼트 플래그 PF_W(2) 있으면 쓰기 허용
+<a href=#243 id=243 data-nosnippet>243</a>        </span><span class="kw">let </span>pte_flags = PTE_USER | PTE_WRITABLE;
+<a href=#244 id=244 data-nosnippet>244</a>
+<a href=#245 id=245 data-nosnippet>245</a>        <span class="kw">let </span><span class="kw-2">mut </span>vpage = page_start;
+<a href=#246 id=246 data-nosnippet>246</a>        <span class="kw">while </span>vpage &lt; page_end {
+<a href=#247 id=247 data-nosnippet>247</a>            <span class="kw">let </span>phys = frame::alloc_frame().expect(<span class="string">"OOM: ELF segment page"</span>);
+<a href=#248 id=248 data-nosnippet>248</a>            <span class="kw">let </span>frame_virt = (phys + hhdm_offset()) <span class="kw">as </span><span class="kw-2">*mut </span>u8;
+<a href=#249 id=249 data-nosnippet>249</a>            <span class="comment">// 페이지 전체를 0으로 초기화 (BSS 영역 처리)
+<a href=#250 id=250 data-nosnippet>250</a>            </span>core::ptr::write_bytes(frame_virt, <span class="number">0</span>, <span class="number">4096</span>);
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a>            <span class="comment">// 이 페이지에 해당하는 파일 데이터 복사
+<a href=#253 id=253 data-nosnippet>253</a>            // page_off_in_seg: 세그먼트 시작(vaddr)에서 현재 페이지의 상대 오프셋
+<a href=#254 id=254 data-nosnippet>254</a>            </span><span class="kw">let </span>page_off_in_seg = (vpage.saturating_sub(page_start)) <span class="kw">as </span>usize;
+<a href=#255 id=255 data-nosnippet>255</a>            <span class="kw">let </span>file_src_start  = seg.offset + page_off_in_seg;
+<a href=#256 id=256 data-nosnippet>256</a>            <span class="kw">let </span>file_src_end    = file_src_start + <span class="number">4096</span>;
+<a href=#257 id=257 data-nosnippet>257</a>            <span class="kw">let </span>copy_end        = file_src_end.min(seg.offset + seg.filesz).min(elf_data.len());
+<a href=#258 id=258 data-nosnippet>258</a>
+<a href=#259 id=259 data-nosnippet>259</a>            <span class="kw">if </span>file_src_start &lt; copy_end {
+<a href=#260 id=260 data-nosnippet>260</a>                <span class="kw">let </span>n = copy_end - file_src_start;
+<a href=#261 id=261 data-nosnippet>261</a>                <span class="comment">// 세그먼트 vaddr이 페이지 경계와 다를 경우 페이지 내 오프셋 조정
+<a href=#262 id=262 data-nosnippet>262</a>                </span><span class="kw">let </span>dst_off = <span class="kw">if </span>vpage &lt; seg.vaddr {
+<a href=#263 id=263 data-nosnippet>263</a>                    (seg.vaddr - vpage) <span class="kw">as </span>usize
+<a href=#264 id=264 data-nosnippet>264</a>                } <span class="kw">else </span>{
+<a href=#265 id=265 data-nosnippet>265</a>                    <span class="number">0
+<a href=#266 id=266 data-nosnippet>266</a>                </span>};
+<a href=#267 id=267 data-nosnippet>267</a>                core::ptr::copy_nonoverlapping(
+<a href=#268 id=268 data-nosnippet>268</a>                    elf_data.as_ptr().add(file_src_start),
+<a href=#269 id=269 data-nosnippet>269</a>                    frame_virt.add(dst_off),
+<a href=#270 id=270 data-nosnippet>270</a>                    n,
+<a href=#271 id=271 data-nosnippet>271</a>                );
+<a href=#272 id=272 data-nosnippet>272</a>            }
+<a href=#273 id=273 data-nosnippet>273</a>
+<a href=#274 id=274 data-nosnippet>274</a>            map_4k(user_pml4, vpage, phys, pte_flags);
+<a href=#275 id=275 data-nosnippet>275</a>            vpage += <span class="number">4096</span>;
+<a href=#276 id=276 data-nosnippet>276</a>        }
+<a href=#277 id=277 data-nosnippet>277</a>    }
+<a href=#278 id=278 data-nosnippet>278</a>
+<a href=#279 id=279 data-nosnippet>279</a>    <span class="comment">// ── 유저 스택 ─────────────────────────────────────────────────────────
+<a href=#280 id=280 data-nosnippet>280</a>    // i=0: USER_STACK_TOP - 4096 ~ USER_STACK_TOP (가장 높은 페이지, argv/auxv 위치)
+<a href=#281 id=281 data-nosnippet>281</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>stack_top_phys = <span class="number">0u64</span>;
+<a href=#282 id=282 data-nosnippet>282</a>    <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..USER_STACK_PAGES {
+<a href=#283 id=283 data-nosnippet>283</a>        <span class="kw">let </span>phys  = frame::alloc_frame().expect(<span class="string">"OOM: ELF stack page"</span>);
+<a href=#284 id=284 data-nosnippet>284</a>        <span class="kw">let </span>vaddr = USER_STACK_TOP - ((i + <span class="number">1</span>) <span class="kw">as </span>u64) * <span class="number">4096</span>;
+<a href=#285 id=285 data-nosnippet>285</a>        map_4k(user_pml4, vaddr, phys, PTE_WRITABLE | PTE_USER);
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="kw">if </span>i == <span class="number">0 </span>{ stack_top_phys = phys; }
+<a href=#287 id=287 data-nosnippet>287</a>    }
+<a href=#288 id=288 data-nosnippet>288</a>
+<a href=#289 id=289 data-nosnippet>289</a>    <span class="comment">// ── argv / envp / auxv 스택 셋업 ────────────────────────────────────
+<a href=#290 id=290 data-nosnippet>290</a>    // Linux _start ABI: rsp → [argc][argv[0]..NULL][envp..NULL][auxv pairs][strings]
+<a href=#291 id=291 data-nosnippet>291</a>    </span><span class="kw">let </span>user_sp = setup_elf_stack(stack_top_phys, hhdm_offset(), USER_STACK_TOP);
+<a href=#292 id=292 data-nosnippet>292</a>
+<a href=#293 id=293 data-nosnippet>293</a>    <span class="macro">crate::serial_println!</span>(<span class="string">"[elf] address space ready. entering ring3 at {:#x} sp={:#x}..."</span>,
+<a href=#294 id=294 data-nosnippet>294</a>        entry, user_sp);
+<a href=#295 id=295 data-nosnippet>295</a>
+<a href=#296 id=296 data-nosnippet>296</a>    <span class="comment">// ── KERNEL_MAIN_RSP 저장 ──────────────────────────────────────────────
+<a href=#297 id=297 data-nosnippet>297</a>    </span><span class="macro">asm!</span>(
+<a href=#298 id=298 data-nosnippet>298</a>        <span class="string">"mov [{save}], rsp"</span>,
+<a href=#299 id=299 data-nosnippet>299</a>        save = <span class="kw">in</span>(reg) <span class="kw-2">&amp;</span><span class="kw">raw </span><span class="kw-2">mut </span>KERNEL_MAIN_RSP,
+<a href=#300 id=300 data-nosnippet>300</a>        options(nostack, preserves_flags),
+<a href=#301 id=301 data-nosnippet>301</a>    );
+<a href=#302 id=302 data-nosnippet>302</a>
+<a href=#303 id=303 data-nosnippet>303</a>    <span class="comment">// ── IRETQ: ring0 → ring3 ─────────────────────────────────────────────
+<a href=#304 id=304 data-nosnippet>304</a>    </span><span class="macro">asm!</span>(
+<a href=#305 id=305 data-nosnippet>305</a>        <span class="string">"mov cr3, {user_cr3}"</span>,
+<a href=#306 id=306 data-nosnippet>306</a>        <span class="string">"push {ss}"</span>,
+<a href=#307 id=307 data-nosnippet>307</a>        <span class="string">"push {user_sp}"</span>,
+<a href=#308 id=308 data-nosnippet>308</a>        <span class="string">"push {flags}"</span>,
+<a href=#309 id=309 data-nosnippet>309</a>        <span class="string">"push {cs}"</span>,
+<a href=#310 id=310 data-nosnippet>310</a>        <span class="string">"push {user_ip}"</span>,
+<a href=#311 id=311 data-nosnippet>311</a>        <span class="string">"iretq"</span>,
+<a href=#312 id=312 data-nosnippet>312</a>        user_cr3 = <span class="kw">in</span>(reg) user_cr3,
+<a href=#313 id=313 data-nosnippet>313</a>        ss       = <span class="kw">in</span>(reg) gdt::USER_SS_RPL3 <span class="kw">as </span>u64,
+<a href=#314 id=314 data-nosnippet>314</a>        user_sp  = <span class="kw">in</span>(reg) user_sp,
+<a href=#315 id=315 data-nosnippet>315</a>        flags    = <span class="kw">in</span>(reg) <span class="number">0x202u64</span>,
+<a href=#316 id=316 data-nosnippet>316</a>        cs       = <span class="kw">in</span>(reg) gdt::USER_CS_RPL3 <span class="kw">as </span>u64,
+<a href=#317 id=317 data-nosnippet>317</a>        user_ip  = <span class="kw">in</span>(reg) entry,
+<a href=#318 id=318 data-nosnippet>318</a>        options(noreturn),
+<a href=#319 id=319 data-nosnippet>319</a>    );
+<a href=#320 id=320 data-nosnippet>320</a>}
+<a href=#321 id=321 data-nosnippet>321</a>
+<a href=#322 id=322 data-nosnippet>322</a><span class="doccomment">/// Linux _start ABI 스택 셋업.
+<a href=#323 id=323 data-nosnippet>323</a>///
+<a href=#324 id=324 data-nosnippet>324</a>/// 스택 레이아웃 (높은 주소 → 낮은 주소):
+<a href=#325 id=325 data-nosnippet>325</a>/// ```
+<a href=#326 id=326 data-nosnippet>326</a>/// USER_STACK_TOP
+<a href=#327 id=327 data-nosnippet>327</a>///   [strings: "prog\0"]           ← 16-byte 정렬
+<a href=#328 id=328 data-nosnippet>328</a>///   [auxv: AT_CLKTCK=17/100, AT_PAGESZ=6/4096, AT_NULL=0/0]
+<a href=#329 id=329 data-nosnippet>329</a>///   [envp: NULL]
+<a href=#330 id=330 data-nosnippet>330</a>///   [argv: ptr_to_prog, NULL]
+<a href=#331 id=331 data-nosnippet>331</a>///   [argc = 1]                    ← new rsp
+<a href=#332 id=332 data-nosnippet>332</a>/// ```
+<a href=#333 id=333 data-nosnippet>333</a>///
+<a href=#334 id=334 data-nosnippet>334</a>/// 물리 페이지(phys)가 유저 가상 [top-4096, top)에 매핑돼 있으므로
+<a href=#335 id=335 data-nosnippet>335</a>/// HHDM을 통해 커널에서 직접 쓴다.
+<a href=#336 id=336 data-nosnippet>336</a></span><span class="kw">unsafe fn </span>setup_elf_stack(phys: u64, hhdm: u64, top: u64) -&gt; u64 {
+<a href=#337 id=337 data-nosnippet>337</a>    <span class="comment">// HHDM 가상 주소로 페이지 접근
+<a href=#338 id=338 data-nosnippet>338</a>    </span><span class="kw">let </span>page_hhdm = (hhdm + phys) <span class="kw">as </span><span class="kw-2">*mut </span>u8;
+<a href=#339 id=339 data-nosnippet>339</a>    <span class="comment">// 유저 가상 주소: [top - 4096, top)
+<a href=#340 id=340 data-nosnippet>340</a>    </span><span class="kw">let </span>page_ubase = top - <span class="number">4096</span>;
+<a href=#341 id=341 data-nosnippet>341</a>
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="comment">// cursor: 페이지 내 byte 오프셋 (top에서 내려감)
+<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>cur: usize = <span class="number">4096</span>;
+<a href=#344 id=344 data-nosnippet>344</a>
+<a href=#345 id=345 data-nosnippet>345</a>    <span class="comment">// ── 문자열 영역 ──────────────────────────────────────────────────────
+<a href=#346 id=346 data-nosnippet>346</a>    // "prog\0"
+<a href=#347 id=347 data-nosnippet>347</a>    </span><span class="kw">let </span>prog_str = <span class="string">b"prog\0"</span>;
+<a href=#348 id=348 data-nosnippet>348</a>    cur -= prog_str.len();
+<a href=#349 id=349 data-nosnippet>349</a>    core::ptr::copy_nonoverlapping(prog_str.as_ptr(), page_hhdm.add(cur), prog_str.len());
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="kw">let </span>prog_ptr: u64 = page_ubase + cur <span class="kw">as </span>u64;
+<a href=#351 id=351 data-nosnippet>351</a>
+<a href=#352 id=352 data-nosnippet>352</a>    <span class="comment">// 16-byte 정렬
+<a href=#353 id=353 data-nosnippet>353</a>    </span>cur &amp;= !<span class="number">0xF</span>;
+<a href=#354 id=354 data-nosnippet>354</a>
+<a href=#355 id=355 data-nosnippet>355</a>    <span class="comment">// ── write_u64 클로저 ─────────────────────────────────────────────────
+<a href=#356 id=356 data-nosnippet>356</a>    </span><span class="macro">macro_rules!</span> push {
+<a href=#357 id=357 data-nosnippet>357</a>        (<span class="macro-nonterminal">$v</span>:expr) =&gt; {{
+<a href=#358 id=358 data-nosnippet>358</a>            cur -= <span class="number">8</span>;
+<a href=#359 id=359 data-nosnippet>359</a>            <span class="kw-2">*</span>(page_hhdm.add(cur) <span class="kw">as </span><span class="kw-2">*mut </span>u64) = <span class="macro-nonterminal">$v </span><span class="kw">as </span>u64;
+<a href=#360 id=360 data-nosnippet>360</a>        }};
+<a href=#361 id=361 data-nosnippet>361</a>    }
+<a href=#362 id=362 data-nosnippet>362</a>
+<a href=#363 id=363 data-nosnippet>363</a>    <span class="comment">// ── auxv (역순: 마지막 pair부터) ─────────────────────────────────────
+<a href=#364 id=364 data-nosnippet>364</a>    </span><span class="macro">push!</span>(<span class="number">0u64</span>);   <span class="comment">// AT_NULL value
+<a href=#365 id=365 data-nosnippet>365</a>    </span><span class="macro">push!</span>(<span class="number">0u64</span>);   <span class="comment">// AT_NULL key
+<a href=#366 id=366 data-nosnippet>366</a>
+<a href=#367 id=367 data-nosnippet>367</a>    </span><span class="macro">push!</span>(<span class="number">100u64</span>); <span class="comment">// AT_CLKTCK value
+<a href=#368 id=368 data-nosnippet>368</a>    </span><span class="macro">push!</span>(<span class="number">17u64</span>);  <span class="comment">// AT_CLKTCK key
+<a href=#369 id=369 data-nosnippet>369</a>
+<a href=#370 id=370 data-nosnippet>370</a>    </span><span class="macro">push!</span>(<span class="number">4096u64</span>);<span class="comment">// AT_PAGESZ value
+<a href=#371 id=371 data-nosnippet>371</a>    </span><span class="macro">push!</span>(<span class="number">6u64</span>);   <span class="comment">// AT_PAGESZ key
+<a href=#372 id=372 data-nosnippet>372</a>
+<a href=#373 id=373 data-nosnippet>373</a>    // ── envp ──────────────────────────────────────────────────────────────
+<a href=#374 id=374 data-nosnippet>374</a>    </span><span class="macro">push!</span>(<span class="number">0u64</span>);   <span class="comment">// NULL (envp 끝)
+<a href=#375 id=375 data-nosnippet>375</a>
+<a href=#376 id=376 data-nosnippet>376</a>    // ── argv ──────────────────────────────────────────────────────────────
+<a href=#377 id=377 data-nosnippet>377</a>    </span><span class="macro">push!</span>(<span class="number">0u64</span>);      <span class="comment">// NULL (argv 끝)
+<a href=#378 id=378 data-nosnippet>378</a>    </span><span class="macro">push!</span>(prog_ptr);  <span class="comment">// argv[0] → "prog"
+<a href=#379 id=379 data-nosnippet>379</a>
+<a href=#380 id=380 data-nosnippet>380</a>    // ── argc ──────────────────────────────────────────────────────────────
+<a href=#381 id=381 data-nosnippet>381</a>    </span><span class="macro">push!</span>(<span class="number">1u64</span>);   <span class="comment">// argc = 1
+<a href=#382 id=382 data-nosnippet>382</a>
+<a href=#383 id=383 data-nosnippet>383</a>    </span>page_ubase + cur <span class="kw">as </span>u64 <span class="comment">// 새 rsp (유저 가상 주소)
+<a href=#384 id=384 data-nosnippet>384</a></span>}
+<a href=#385 id=385 data-nosnippet>385</a>
+<a href=#386 id=386 data-nosnippet>386</a><span class="kw">pub unsafe fn </span>enter_user_demo(code: <span class="kw-2">&amp;</span>[u8]) -&gt; ! {
+<a href=#387 id=387 data-nosnippet>387</a>    <span class="macro">assert!</span>(!code.is_empty() &amp;&amp; code.len() &lt;= <span class="number">4096</span>, <span class="string">"user code must fit in one page"</span>);
+<a href=#388 id=388 data-nosnippet>388</a>
+<a href=#389 id=389 data-nosnippet>389</a>    <span class="comment">// ── 유저 PML4 생성 ───────────────────────────────────────────────────
+<a href=#390 id=390 data-nosnippet>390</a>    </span><span class="kw">let </span>user_pml4 = alloc_table();
+<a href=#391 id=391 data-nosnippet>391</a>
+<a href=#392 id=392 data-nosnippet>392</a>    <span class="comment">// 커널 절반 공유: ring3에서 발생한 인터럽트/예외 핸들러가
+<a href=#393 id=393 data-nosnippet>393</a>    // 커널 코드와 스택에 접근할 수 있어야 하므로 상위 절반 엔트리를 복사.
+<a href=#394 id=394 data-nosnippet>394</a>    </span><span class="kw">let </span>kpml4 = table_at(KERNEL_CR3 &amp; !<span class="number">0xFFF</span>);
+<a href=#395 id=395 data-nosnippet>395</a>    <span class="kw">for </span>i <span class="kw">in </span><span class="number">256</span>..<span class="number">512usize </span>{
+<a href=#396 id=396 data-nosnippet>396</a>        (<span class="kw-2">*</span>user_pml4).<span class="number">0</span>[i] = kpml4.<span class="number">0</span>[i];
+<a href=#397 id=397 data-nosnippet>397</a>    }
+<a href=#398 id=398 data-nosnippet>398</a>
+<a href=#399 id=399 data-nosnippet>399</a>    <span class="kw">let </span>user_cr3 = user_pml4 <span class="kw">as </span>u64 - hhdm_offset();
+<a href=#400 id=400 data-nosnippet>400</a>
+<a href=#401 id=401 data-nosnippet>401</a>    <span class="comment">// ── 유저 코드 매핑 ───────────────────────────────────────────────────
+<a href=#402 id=402 data-nosnippet>402</a>    // 코드 페이지: USER(ring3 접근) + PRESENT, WRITABLE 없음(읽기/실행 전용)
+<a href=#403 id=403 data-nosnippet>403</a>    // x86_64에서 기본 실행 허용(NX 비트 미사용).
+<a href=#404 id=404 data-nosnippet>404</a>    </span><span class="kw">let </span>code_phys = frame::alloc_frame().expect(<span class="string">"OOM: user code frame"</span>);
+<a href=#405 id=405 data-nosnippet>405</a>    <span class="kw">let </span>code_virt = (code_phys + hhdm_offset()) <span class="kw">as </span><span class="kw-2">*mut </span>u8;
+<a href=#406 id=406 data-nosnippet>406</a>    core::ptr::copy_nonoverlapping(code.as_ptr(), code_virt, code.len());
+<a href=#407 id=407 data-nosnippet>407</a>    map_4k(user_pml4, USER_CODE_VADDR, code_phys, PTE_USER);
+<a href=#408 id=408 data-nosnippet>408</a>    <span class="comment">// WRITABLE 없음 → 코드 영역은 읽기/실행 전용
+<a href=#409 id=409 data-nosnippet>409</a>
+<a href=#410 id=410 data-nosnippet>410</a>    // ── 유저 스택 매핑 ───────────────────────────────────────────────────
+<a href=#411 id=411 data-nosnippet>411</a>    // 스택 페이지: USER + WRITABLE + PRESENT
+<a href=#412 id=412 data-nosnippet>412</a>    // 스택은 USER_STACK_TOP 바로 아래 프레임부터 시작.
+<a href=#413 id=413 data-nosnippet>413</a>    </span><span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..USER_STACK_PAGES {
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="kw">let </span>phys  = frame::alloc_frame().expect(<span class="string">"OOM: user stack frame"</span>);
+<a href=#415 id=415 data-nosnippet>415</a>        <span class="kw">let </span>vaddr = USER_STACK_TOP - ((i + <span class="number">1</span>) <span class="kw">as </span>u64) * <span class="number">4096</span>;
+<a href=#416 id=416 data-nosnippet>416</a>        map_4k(user_pml4, vaddr, phys, PTE_WRITABLE | PTE_USER);
+<a href=#417 id=417 data-nosnippet>417</a>    }
+<a href=#418 id=418 data-nosnippet>418</a>
+<a href=#419 id=419 data-nosnippet>419</a>    <span class="macro">crate::serial_println!</span>(<span class="string">"[paging] User address space:"</span>);
+<a href=#420 id=420 data-nosnippet>420</a>    <span class="macro">crate::serial_println!</span>(<span class="string">"  code  → virt={:#x}  ({} bytes)"</span>, USER_CODE_VADDR, code.len());
+<a href=#421 id=421 data-nosnippet>421</a>    <span class="macro">crate::serial_println!</span>(<span class="string">"  stack → virt={:#x}..{:#x}  ({} pages)"</span>,
+<a href=#422 id=422 data-nosnippet>422</a>        USER_STACK_TOP - (USER_STACK_PAGES <span class="kw">as </span>u64) * <span class="number">4096</span>,
+<a href=#423 id=423 data-nosnippet>423</a>        USER_STACK_TOP, USER_STACK_PAGES);
+<a href=#424 id=424 data-nosnippet>424</a>
+<a href=#425 id=425 data-nosnippet>425</a>    <span class="comment">// ── 커널 메인 RSP 저장 ───────────────────────────────────────────────
+<a href=#426 id=426 data-nosnippet>426</a>    // syscall_handler()가 3회 호출 후 이 RSP로 복원 후 after_user_demo()로 점프.
+<a href=#427 id=427 data-nosnippet>427</a>    // 저장 시점: 아래 IRETQ 프레임을 push하기 전이므로
+<a href=#428 id=428 data-nosnippet>428</a>    //            복원 시 RSP는 IRETQ 프레임 이전 상태 → 유효한 커널 스택.
+<a href=#429 id=429 data-nosnippet>429</a>    </span><span class="macro">asm!</span>(
+<a href=#430 id=430 data-nosnippet>430</a>        <span class="string">"mov [{save}], rsp"</span>,
+<a href=#431 id=431 data-nosnippet>431</a>        save = <span class="kw">in</span>(reg) <span class="kw-2">&amp;</span><span class="kw">raw </span><span class="kw-2">mut </span>KERNEL_MAIN_RSP,
+<a href=#432 id=432 data-nosnippet>432</a>        options(nostack, preserves_flags),
+<a href=#433 id=433 data-nosnippet>433</a>    );
+<a href=#434 id=434 data-nosnippet>434</a>
+<a href=#435 id=435 data-nosnippet>435</a>    <span class="macro">crate::serial_println!</span>(<span class="string">"[paging] Entering ring3 via IRETQ..."</span>);
+<a href=#436 id=436 data-nosnippet>436</a>    <span class="macro">crate::serial_println!</span>(<span class="string">"         code at virt={:#x}, stack top={:#x}"</span>,
+<a href=#437 id=437 data-nosnippet>437</a>        USER_CODE_VADDR, USER_STACK_TOP);
+<a href=#438 id=438 data-nosnippet>438</a>
+<a href=#439 id=439 data-nosnippet>439</a>    <span class="comment">// ── IRETQ: ring0 → ring3 ─────────────────────────────────────────────
+<a href=#440 id=440 data-nosnippet>440</a>    //
+<a href=#441 id=441 data-nosnippet>441</a>    // ring0에서 ring3으로 전환하려면 IRETQ 명령어 사용.
+<a href=#442 id=442 data-nosnippet>442</a>    // 스택에 다음 순서로 push (IRETQ가 반대 순서로 pop):
+<a href=#443 id=443 data-nosnippet>443</a>    //
+<a href=#444 id=444 data-nosnippet>444</a>    //   [낮은주소] RIP     ← IRETQ 후 ring3 코드가 시작할 주소
+<a href=#445 id=445 data-nosnippet>445</a>    //              CS      ← ring3 코드 세그먼트 셀렉터 (RPL=3 필수)
+<a href=#446 id=446 data-nosnippet>446</a>    //              RFLAGS  ← 새 RFLAGS (IF=1로 인터럽트 허용)
+<a href=#447 id=447 data-nosnippet>447</a>    //              RSP     ← ring3 스택 포인터
+<a href=#448 id=448 data-nosnippet>448</a>    //   [높은주소] SS      ← ring3 스택 세그먼트 셀렉터 (RPL=3 필수)
+<a href=#449 id=449 data-nosnippet>449</a>    //
+<a href=#450 id=450 data-nosnippet>450</a>    // CS/SS의 RPL(Request Privilege Level)=3 필수:
+<a href=#451 id=451 data-nosnippet>451</a>    //   RPL이 최종 CPL(Current Privilege Level)을 결정함.
+<a href=#452 id=452 data-nosnippet>452</a>    //   RPL &lt; 3이면 ring3로 전환되지 않음.
+<a href=#453 id=453 data-nosnippet>453</a>    </span><span class="macro">asm!</span>(
+<a href=#454 id=454 data-nosnippet>454</a>        <span class="string">"mov cr3, {user_cr3}"</span>,      <span class="comment">// 유저 페이지 테이블로 전환
+<a href=#455 id=455 data-nosnippet>455</a>        </span><span class="string">"push {ss}"</span>,                <span class="comment">// SS  = 유저 데이터 세그먼트 (RPL=3)
+<a href=#456 id=456 data-nosnippet>456</a>        </span><span class="string">"push {user_sp}"</span>,           <span class="comment">// RSP = 유저 스택 포인터
+<a href=#457 id=457 data-nosnippet>457</a>        </span><span class="string">"push {flags}"</span>,             <span class="comment">// RFLAGS = IF=1 (인터럽트 허용)
+<a href=#458 id=458 data-nosnippet>458</a>        </span><span class="string">"push {cs}"</span>,                <span class="comment">// CS  = 유저 코드 세그먼트 (RPL=3)
+<a href=#459 id=459 data-nosnippet>459</a>        </span><span class="string">"push {user_ip}"</span>,           <span class="comment">// RIP = 유저 코드 진입점
+<a href=#460 id=460 data-nosnippet>460</a>        </span><span class="string">"iretq"</span>,                    <span class="comment">// ring3 전환 (CPL: 0 → 3)
+<a href=#461 id=461 data-nosnippet>461</a>        </span>user_cr3 = <span class="kw">in</span>(reg) user_cr3,
+<a href=#462 id=462 data-nosnippet>462</a>        ss       = <span class="kw">in</span>(reg) gdt::USER_SS_RPL3 <span class="kw">as </span>u64,
+<a href=#463 id=463 data-nosnippet>463</a>        user_sp  = <span class="kw">in</span>(reg) USER_STACK_TOP,
+<a href=#464 id=464 data-nosnippet>464</a>        flags    = <span class="kw">in</span>(reg) <span class="number">0x202u64</span>,  <span class="comment">// RFLAGS: IF=1 + 예약비트(bit1)
+<a href=#465 id=465 data-nosnippet>465</a>        </span>cs       = <span class="kw">in</span>(reg) gdt::USER_CS_RPL3 <span class="kw">as </span>u64,
+<a href=#466 id=466 data-nosnippet>466</a>        user_ip  = <span class="kw">in</span>(reg) USER_CODE_VADDR,
+<a href=#467 id=467 data-nosnippet>467</a>        options(noreturn),
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="comment">// noreturn: IRETQ 이후 ring3 실행, 이 asm 블록으로 돌아오지 않음
+<a href=#469 id=469 data-nosnippet>469</a>        // 복귀는 syscall_handler의 longjmp가 after_user_demo()로 점프
+<a href=#470 id=470 data-nosnippet>470</a>    </span>);
+<a href=#471 id=471 data-nosnippet>471</a>}
+</code></pre></div></section></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PTE_PRESENT","PTE_USER","PTE_WRITABLE","USER_CODE_VADDR","USER_STACK_PAGES","USER_STACK_TOP"],"fn":["alloc_table","enter_elf","enter_user_demo","get_or_create","init","map_4k","setup_elf_stack","table_at"],"static":["KERNEL_CR3","KERNEL_MAIN_RSP","USER_KERNEL_STACK"],"struct":["PageTable"]};

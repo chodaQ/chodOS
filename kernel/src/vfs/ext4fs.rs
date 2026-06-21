@@ -17,10 +17,10 @@
 
 use alloc::{
     boxed::Box,
-    string::{String, ToString},
+    string::String,
     vec::Vec,
 };
-use ext4_view::{Ext4, Ext4Read, PathBuf};
+use ext4_view::{Ext4, Ext4Read};
 
 use crate::vfs::DirEntry;
 

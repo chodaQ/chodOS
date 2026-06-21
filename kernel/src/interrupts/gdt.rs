@@ -135,7 +135,7 @@ pub fn init() {
         // ── GDTR 로드 ──────────────────────────────────────────────────────
         let gdtr = GdtPointer {
             limit: (mem::size_of::<Gdt>() - 1) as u16,
-            base:  GDT.0.as_ptr() as u64,
+            base:  core::ptr::addr_of!(GDT.0) as u64,
         };
         asm!("lgdt [{}]", in(reg) &gdtr, options(readonly, nostack, preserves_flags));
 
@@ -177,6 +177,34 @@ pub fn init() {
         "[gdt] GDT loaded: kernel(0x{:02x}/0x{:02x}) tss(0x{:02x}) user(0x{:02x}/0x{:02x})",
         KERNEL_CODE_SEL, KERNEL_DATA_SEL, TSS_SEL, USER_CODE_SEL, USER_DATA_SEL
     );
+}
+
+/// AP 전용: LGDT + CS/DS 재로드 (TSS 없음, 출력 없음)
+pub fn ap_load() {
+    unsafe {
+        let gdtr = GdtPointer {
+            limit: (mem::size_of::<Gdt>() - 1) as u16,
+            base:  core::ptr::addr_of!(GDT.0) as u64,
+        };
+        asm!("lgdt [{}]", in(reg) &gdtr, options(readonly, nostack, preserves_flags));
+        asm!(
+            "pushq {sel}",
+            "leaq 1f(%rip), %rax",
+            "pushq %rax",
+            "lretq",
+            "1:",
+            sel = in(reg) KERNEL_CODE_SEL as u64,
+            out("rax") _,
+            options(att_syntax),
+        );
+        asm!(
+            "mov ds, ax",
+            "mov es, ax",
+            "mov ss, ax",
+            in("ax") KERNEL_DATA_SEL,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
 }
 
 /// TSS.RSP0 설정 — ring3 → ring0 전환 시 CPU가 사용할 커널 스택 포인터

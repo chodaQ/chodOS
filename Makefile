@@ -21,7 +21,10 @@ MUSHELL_DIR := user/mushell
 SYSINFO_ELF := build/sysinfo.elf
 MUECHO_ELF  := build/muecho.elf
 MUCAT_ELF   := build/mucat.elf
-PKG_ELFS    := $(SYSINFO_ELF) $(MUECHO_ELF) $(MUCAT_ELF)
+# BETA 7 패키지 ELF들
+MULS_ELF    := build/muls.elf
+MUPWD_ELF   := build/mupwd.elf
+PKG_ELFS    := $(SYSINFO_ELF) $(MUECHO_ELF) $(MUCAT_ELF) $(MULS_ELF) $(MUPWD_ELF)
 
 # ALPHA 17: 8x8 비트맵 폰트 바이너리 (scripts/gen_font.py 생성)
 FONT_BIN := build/font8x8.bin
@@ -168,6 +171,20 @@ $(MUCAT_ELF): $(wildcard user/pkgs/mucat/src/*.rs) user/pkgs/mucat/Cargo.toml us
 	cp user/pkgs/mucat/target/x86_64-unknown-none/release/mucat $(MUCAT_ELF)
 	@echo "[mukg] Built: $(MUCAT_ELF) ($$(wc -c < $(MUCAT_ELF) | tr -d ' ') bytes)"
 
+$(MULS_ELF): $(wildcard user/pkgs/muls/src/*.rs) user/pkgs/muls/Cargo.toml user/pkgs/muls/pkg.ld
+	@mkdir -p build
+	@echo "[mukg] Building muls..."
+	cd user/pkgs/muls && cargo build --release
+	cp user/pkgs/muls/target/x86_64-unknown-none/release/muls $(MULS_ELF)
+	@echo "[mukg] Built: $(MULS_ELF) ($$(wc -c < $(MULS_ELF) | tr -d ' ') bytes)"
+
+$(MUPWD_ELF): $(wildcard user/pkgs/mupwd/src/*.rs) user/pkgs/mupwd/Cargo.toml user/pkgs/mupwd/pkg.ld
+	@mkdir -p build
+	@echo "[mukg] Building mupwd..."
+	cd user/pkgs/mupwd && cargo build --release
+	cp user/pkgs/mupwd/target/x86_64-unknown-none/release/mupwd $(MUPWD_ELF)
+	@echo "[mukg] Built: $(MUPWD_ELF) ($$(wc -c < $(MUPWD_ELF) | tr -d ' ') bytes)"
+
 # ==================== 커널 빌드 ====================
 
 # ==================== ALPHA 17: 8x8 폰트 바이너리 ====================
@@ -261,6 +278,7 @@ run: $(ISO) $(DISK_IMG)
 	@echo "--------------------------------------------"
 	qemu-system-x86_64 \
 		-M q35 \
+		-smp 4 \
 		-cdrom $(ISO) \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=none,id=vd0,format=raw,file=$(DISK_IMG) \
@@ -274,6 +292,7 @@ run: $(ISO) $(DISK_IMG)
 		-display none
 	# 옵션 설명:
 	# -M q35         : Q35 칩셋 에뮬레이션 (최신 PCIe + UEFI 지원)
+	# -smp 4         : 4코어 에뮬레이션 (BETA 5 SMP 지원)
 	# -cdrom         : CD-ROM 드라이브에 ISO 마운트
 	# -drive pflash  : UEFI 펌웨어 플래시 메모리 (edk2-x86_64-code.fd)
 	# -serial stdio  : COM1 시리얼 출력 → 호스트 터미널 (이게 우리의 println!)
@@ -289,6 +308,7 @@ run-gui: $(ISO) $(DISK_IMG)
 	@echo "--------------------------------------------"
 	qemu-system-x86_64 \
 		-M q35 \
+		-smp 4 \
 		-cdrom $(ISO) \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=none,id=vd0,format=raw,file=$(DISK_IMG) \
@@ -337,6 +357,8 @@ clean:
 	cd user/pkgs/sysinfo && cargo clean 2>/dev/null || true
 	cd user/pkgs/muecho  && cargo clean 2>/dev/null || true
 	cd user/pkgs/mucat   && cargo clean 2>/dev/null || true
+	cd user/pkgs/muls    && cargo clean 2>/dev/null || true
+	cd user/pkgs/mupwd   && cargo clean 2>/dev/null || true
 	@echo "[clean] Done."
 	# font8x8.bin은 build/ 디렉토리에 있으므로 rm -rf build/로 이미 삭제됨
 

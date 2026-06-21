@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BUF_CAP","LOWER","UPPER"],"fn":["handle_scancode","has_key","push_key","read_key_blocking","try_pop"],"static":["CAPS","KBD","SHIFT"],"struct":["KbdBuf"]};

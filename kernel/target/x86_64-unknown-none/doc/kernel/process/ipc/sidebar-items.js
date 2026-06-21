@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["msg_as_u64","recv","send","send_u64"]};

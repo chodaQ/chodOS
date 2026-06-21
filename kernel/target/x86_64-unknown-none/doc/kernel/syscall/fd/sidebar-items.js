@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["close","dir_path","fstat","init","is_open","list","open_dir","open_file","pread","read","seek","with_table"],"static":["FD_TABLE"],"struct":["DirResource","FdTableCell","FileResource"]};

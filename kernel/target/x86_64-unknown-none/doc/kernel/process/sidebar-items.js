@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["IRETQ_FRAME_SIZE","ISR_REG_COUNT","KERNEL_STACK_SIZE","PREEMPT_FRAME_BYTES"],"enum":["Priority","ProcessState"],"mod":["context","handle","ipc","ipc_cap","scheduler"],"struct":["Message","Process"],"type":["Pid"]};

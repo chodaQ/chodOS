@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COM1","LCR_8BIT","LCR_DLAB","LSR_DR","LSR_THRE","REG_DATA","REG_FCR","REG_IER","REG_IIR","REG_LCR","REG_LSR","REG_MCR","REG_MSR"],"fn":["inb","init","outb","read_byte_blocking","try_read_byte","wait_for_empty_transmit","write_byte"],"struct":["SerialWriter"]};

@@ -1,4 +1,5 @@
 //! BETA 2-1: 메모리 관련 syscall — Linux x86-64 ABI
+#![allow(dead_code)]
 
 /// 10: mprotect(addr, len, prot) → stub 0 (페이지 보호 변경 미지원)
 pub fn sys_mprotect(_addr: u64, _len: u64, _prot: u64) -> i64 { 0 }

@@ -376,5 +376,5 @@ pub fn list_handles() -> alloc::vec::Vec<(u32, super::handle::Rights)> {
 }
 
 unsafe fn get() -> &'static mut Scheduler {
-    SCHEDULER.as_mut().expect("scheduler not initialized")
+    (*core::ptr::addr_of_mut!(SCHEDULER)).as_mut().expect("scheduler not initialized")
 }

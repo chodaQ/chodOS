@@ -29,13 +29,13 @@ unsafe fn sys_write(fd: i64, buf: *const u8, len: usize) -> i64 {
     ret
 }
 
-// SYS_PKG_GETARGS = 201: 현재 패키지에 전달된 args 문자열 읽기
+// SYS_PKG_GETARGS = 401: 현재 패키지에 전달된 args 문자열 읽기
 #[inline(always)]
 unsafe fn sys_pkg_getargs(buf: *mut u8, len: usize) -> i64 {
     let ret: i64;
     core::arch::asm!(
         "int 0x80",
-        inlateout("rax") 201i64 => ret,
+        inlateout("rax") 401i64 => ret,
         in("rdi") buf,
         in("rsi") len,
         options(nostack),

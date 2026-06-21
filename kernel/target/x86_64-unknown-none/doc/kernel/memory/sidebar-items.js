@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["hhdm_offset","init","phys_to_virt"],"mod":["frame","heap"],"static":["HHDM_OFFSET"]};

@@ -107,14 +107,14 @@ pub unsafe extern "C" fn switch_context(
     );
 }
 
-/// 실제 컨텍스트 스위치 어셈블리 구현
-///
-/// AT&T 문법: `movq src, dst` (Intel 문법과 반대)
-/// 예: `movq %rbx, 0x00(%rdi)` = rbx 값을 [rdi+0] 에 저장
-///
-/// 레지스터 역할 (System V ABI 함수 인수):
-/// - %rdi = from (첫 번째 인수 = CpuContext 저장 위치)
-/// - %rsi = to   (두 번째 인수 = CpuContext 복원 위치)
+// 실제 컨텍스트 스위치 어셈블리 구현
+//
+// AT&T 문법: `movq src, dst` (Intel 문법과 반대)
+// 예: `movq %rbx, 0x00(%rdi)` = rbx 값을 [rdi+0] 에 저장
+//
+// 레지스터 역할 (System V ABI 함수 인수):
+// - %rdi = from (첫 번째 인수 = CpuContext 저장 위치)
+// - %rsi = to   (두 번째 인수 = CpuContext 복원 위치)
 // Intel 문법 (Rust global_asm! 기본값):
 //   mov [rdi + offset], reg    (src → dst 순서가 AT&T와 반대)
 //   mov reg, [rsi + offset]

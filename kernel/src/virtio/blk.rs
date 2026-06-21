@@ -188,7 +188,7 @@ impl VirtioBlk {
 
             // 요청 헤더 + 상태 바이트 (스택에 할당)
             let hdr    = BlkReqHdr { type_, reserved: 0, sector };
-            let mut status: u8 = 0xFF;
+            let status: u8 = 0xFF;
 
             let hdr_phys    = (&hdr    as *const BlkReqHdr as u64).wrapping_sub(hhdm);
             let buf_phys    = (buf.as_ptr()                 as u64).wrapping_sub(hhdm);

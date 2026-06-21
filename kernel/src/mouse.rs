@@ -193,14 +193,24 @@ fn process_packet() {
     let btn = b0 & 0x07; // [M|R|L]
     MOUSE_BTN.store(btn, Ordering::Relaxed);
 
-    // 왼쪽 버튼 클릭 엣지 (뗐다가 눌렀을 때)
     let prev = PREV_BTN.load(Ordering::Relaxed);
+
+    // 왼쪽 버튼 rising edge → 클릭
     if btn & 0x01 != 0 && prev & 0x01 == 0 {
         on_click(x, y);
     }
+    // 왼쪽 버튼 홀드 + 이동 → 드래그
+    if btn & 0x01 != 0 && (dx != 0 || dy != 0) {
+        crate::wm::on_drag(x, y);
+    }
+    // 왼쪽 버튼 falling edge → 드래그 종료
+    if prev & 0x01 != 0 && btn & 0x01 == 0 {
+        crate::wm::on_release();
+    }
+
     PREV_BTN.store(btn, Ordering::Relaxed);
 
-    // 커서 다시 그리기
+    // 커서 다시 그리기 (드래그 중엔 on_drag 내부에서 이미 redraw하므로 중복되지만 무해)
     crate::fb::draw_cursor(x, y);
 }
 

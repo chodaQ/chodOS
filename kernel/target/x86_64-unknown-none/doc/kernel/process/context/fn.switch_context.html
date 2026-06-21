@@ -1,0 +1,40 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="현재 CPU 컨텍스트를 `from`에 저장하고 `to`의 컨텍스트로 전환"><title>switch_context in kernel::process::context - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="kernel" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0-nightly (cb40c25f6 2026-05-04)" data-channel="nightly" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-aa4d37ac.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">switch_context</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../kernel/index.html">kernel</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">switch_<wbr>context</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#동작-원리-어셈블리-추적" title="동작 원리 (어셈블리 추적)">동작 원리 (어셈블리 추적)</a></li><li><a href="#safety" title="Safety">Safety</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In kernel::<wbr>process::<wbr>context</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">kernel</a>::<wbr><a href="../index.html">process</a>::<wbr><a href="index.html">context</a></div><h1>Function <span class="fn">switch_<wbr>context</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/kernel/process/context.rs.html#96-108">Source</a> </span></div><pre class="rust item-decl"><code>pub unsafe extern &quot;C&quot; fn switch_context(
+    from: *mut <a class="struct" href="struct.CpuContext.html" title="struct kernel::process::context::CpuContext">CpuContext</a>,
+    to: *const <a class="struct" href="struct.CpuContext.html" title="struct kernel::process::context::CpuContext">CpuContext</a>,
+)</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>현재 CPU 컨텍스트를 <code>from</code>에 저장하고 <code>to</code>의 컨텍스트로 전환</p>
+<h2 id="동작-원리-어셈블리-추적"><a class="doc-anchor" href="#%EB%8F%99%EC%9E%91-%EC%9B%90%EB%A6%AC-%EC%96%B4%EC%85%88%EB%B8%94%EB%A6%AC-%EC%B6%94%EC%A0%81">§</a>동작 원리 (어셈블리 추적)</h2>
+<p>예: A가 switch_context(A.ctx, B.ctx)를 호출할 때:</p>
+<ol>
+<li>
+<p>x86 CALL 명령어 실행 → 복귀 주소가 스택에 push됨
+(이 복귀 주소 = switch_context 호출 다음 명령어 = A가 재개될 위치)</p>
+</li>
+<li>
+<p>switch_context 진입:</p>
+<ul>
+<li>RBX~R15, RSP를 A.ctx에 저장</li>
+<li>RSP 저장 시점: 복귀 주소가 이미 스택에 있음</li>
+</ul>
+</li>
+<li>
+<p>B.ctx에서 RBX~R15, RSP를 복원:</p>
+<ul>
+<li>RSP가 B의 스택으로 전환됨</li>
+</ul>
+</li>
+<li>
+<p><code>retq</code> 실행:</p>
+<ul>
+<li>B의 스택 최상단에서 복귀 주소를 팝 → RIP에 로드</li>
+<li>B가 이전에 switch_context를 호출했다면, 그 직후로 복귀</li>
+<li>B가 새로 생성됐다면, 스택에 미리 넣어둔 entry_fn 주소로 점프</li>
+</ul>
+</li>
+</ol>
+<h2 id="safety"><a class="doc-anchor" href="#safety">§</a>Safety</h2>
+<ul>
+<li><code>from</code>과 <code>to</code>가 서로 다른 CpuContext를 가리켜야 함 (aliasing 금지)</li>
+<li><code>to.rsp</code>가 유효한 스택을 가리켜야 함</li>
+<li>단일 코어에서만 호출해야 함 (멀티코어 미지원)</li>
+</ul>
+</div></details></section></div></main></body></html>

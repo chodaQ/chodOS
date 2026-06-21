@@ -1,0 +1,314 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/serial.rs`."><title>serial.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="kernel" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0-nightly (cb40c25f6 2026-05-04)" data-channel="nightly" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-aa4d37ac.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">kernel/</div>serial.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! UART 16550 시리얼 드라이버
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! ## UART란?
+<a href=#4 id=4 data-nosnippet>4</a>//! Universal Asynchronous Receiver-Transmitter (범용 비동기 송수신기).
+<a href=#5 id=5 data-nosnippet>5</a>//! IBM PC XT(1983)부터 내장된 직렬 통신 인터페이스.
+<a href=#6 id=6 data-nosnippet>6</a>//! 현대 PC에는 물리적 포트가 없어도 칩셋에 여전히 내장되어 있음.
+<a href=#7 id=7 data-nosnippet>7</a>//!
+<a href=#8 id=8 data-nosnippet>8</a>//! ## 왜 시리얼 출력을 먼저 구현하는가?
+<a href=#9 id=9 data-nosnippet>9</a>//! - VGA/Framebuffer는 초기화가 복잡함 (GOP, EDID, 해상도 협상 등)
+<a href=#10 id=10 data-nosnippet>10</a>//! - 시리얼은 레지스터 몇 개만 설정하면 바로 동작
+<a href=#11 id=11 data-nosnippet>11</a>//! - QEMU의 `-serial stdio` 옵션으로 호스트 터미널에 출력 가능
+<a href=#12 id=12 data-nosnippet>12</a>//! - 커널 개발의 핵심 디버깅 도구
+<a href=#13 id=13 data-nosnippet>13</a>//!
+<a href=#14 id=14 data-nosnippet>14</a>//! ## 하드웨어 주소
+<a href=#15 id=15 data-nosnippet>15</a>//! COM1: 0x3F8 (IBM PC AT 표준, 거의 모든 x86 시스템에서 동일)
+<a href=#16 id=16 data-nosnippet>16</a>//! COM2: 0x2F8
+<a href=#17 id=17 data-nosnippet>17</a>//! COM3: 0x3E8
+<a href=#18 id=18 data-nosnippet>18</a>//! COM4: 0x2E8
+<a href=#19 id=19 data-nosnippet>19</a>
+<a href=#20 id=20 data-nosnippet>20</a></span><span class="kw">use </span>core::fmt;
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">use </span>core::fmt::Write;
+<a href=#22 id=22 data-nosnippet>22</a>
+<a href=#23 id=23 data-nosnippet>23</a><span class="comment">// ==================== UART 레지스터 주소 ====================
+<a href=#24 id=24 data-nosnippet>24</a>// 모든 주소는 COM1 베이스(0x3F8)로부터의 오프셋
+<a href=#25 id=25 data-nosnippet>25</a>
+<a href=#26 id=26 data-nosnippet>26</a></span><span class="kw">const </span>COM1: u16 = <span class="number">0x3F8</span>; <span class="comment">// COM1 베이스 주소
+<a href=#27 id=27 data-nosnippet>27</a>
+<a href=#28 id=28 data-nosnippet>28</a>// DLAB(Divisor Latch Access Bit) = 0 일 때의 레지스터 매핑:
+<a href=#29 id=29 data-nosnippet>29</a></span><span class="kw">const </span>REG_DATA: u16 = COM1 + <span class="number">0</span>; <span class="comment">// 수신 버퍼(읽기) / 송신 홀딩 레지스터(쓰기)
+<a href=#30 id=30 data-nosnippet>30</a></span><span class="kw">const </span>REG_IER: u16 = COM1 + <span class="number">1</span>; <span class="comment">// Interrupt Enable Register
+<a href=#31 id=31 data-nosnippet>31</a>
+<a href=#32 id=32 data-nosnippet>32</a>// DLAB = 1 일 때의 레지스터 매핑 (보드레이트 설정용):
+<a href=#33 id=33 data-nosnippet>33</a>// REG_DATA(+0) → Divisor Latch Low byte
+<a href=#34 id=34 data-nosnippet>34</a>// REG_IER(+1)  → Divisor Latch High byte
+<a href=#35 id=35 data-nosnippet>35</a>
+<a href=#36 id=36 data-nosnippet>36</a>// DLAB 상태와 무관하게 고정된 레지스터:
+<a href=#37 id=37 data-nosnippet>37</a></span><span class="attr">#[allow(dead_code)] </span><span class="comment">// 추후 인터럽트 기반 시리얼 구현 때 사용
+<a href=#38 id=38 data-nosnippet>38</a></span><span class="kw">const </span>REG_IIR: u16 = COM1 + <span class="number">2</span>; <span class="comment">// Interrupt Identification Register (읽기)
+<a href=#39 id=39 data-nosnippet>39</a></span><span class="kw">const </span>REG_FCR: u16 = COM1 + <span class="number">2</span>; <span class="comment">// FIFO Control Register (쓰기)
+<a href=#40 id=40 data-nosnippet>40</a></span><span class="kw">const </span>REG_LCR: u16 = COM1 + <span class="number">3</span>; <span class="comment">// Line Control Register
+<a href=#41 id=41 data-nosnippet>41</a></span><span class="kw">const </span>REG_MCR: u16 = COM1 + <span class="number">4</span>; <span class="comment">// Modem Control Register
+<a href=#42 id=42 data-nosnippet>42</a></span><span class="kw">const </span>REG_LSR: u16 = COM1 + <span class="number">5</span>; <span class="comment">// Line Status Register
+<a href=#43 id=43 data-nosnippet>43</a></span><span class="attr">#[allow(dead_code)] </span><span class="comment">// 추후 흐름 제어(flow control) 구현 때 사용
+<a href=#44 id=44 data-nosnippet>44</a></span><span class="kw">const </span>REG_MSR: u16 = COM1 + <span class="number">6</span>; <span class="comment">// Modem Status Register
+<a href=#45 id=45 data-nosnippet>45</a>
+<a href=#46 id=46 data-nosnippet>46</a>// LCR 비트 플래그
+<a href=#47 id=47 data-nosnippet>47</a></span><span class="kw">const </span>LCR_DLAB: u8 = <span class="number">0x80</span>; <span class="comment">// Divisor Latch Access Bit (7번 비트)
+<a href=#48 id=48 data-nosnippet>48</a></span><span class="kw">const </span>LCR_8BIT: u8 = <span class="number">0x03</span>; <span class="comment">// 데이터 8비트, 패리티 없음, 정지비트 1개 (8N1)
+<a href=#49 id=49 data-nosnippet>49</a>
+<a href=#50 id=50 data-nosnippet>50</a>// LSR 비트 플래그
+<a href=#51 id=51 data-nosnippet>51</a></span><span class="kw">const </span>LSR_THRE: u8 = <span class="number">0x20</span>; <span class="comment">// Transmit Holding Register Empty
+<a href=#52 id=52 data-nosnippet>52</a>                            // 이 비트가 1 = 다음 바이트 쓸 준비 완료
+<a href=#53 id=53 data-nosnippet>53</a></span><span class="kw">const </span>LSR_DR:   u8 = <span class="number">0x01</span>; <span class="comment">// Data Ready — 이 비트가 1 = 수신 버퍼에 데이터 있음
+<a href=#54 id=54 data-nosnippet>54</a>
+<a href=#55 id=55 data-nosnippet>55</a>// ==================== 포트 I/O 함수 ====================
+<a href=#56 id=56 data-nosnippet>56</a>//
+<a href=#57 id=57 data-nosnippet>57</a>// x86 아키텍처는 메모리(RAM)와 별도의 I/O 주소 공간을 가짐.
+<a href=#58 id=58 data-nosnippet>58</a>// Port-Mapped I/O (PMIO)라고 함.
+<a href=#59 id=59 data-nosnippet>59</a>// 일반 메모리 접근(mov 명령어)으로는 I/O 포트에 접근 불가.
+<a href=#60 id=60 data-nosnippet>60</a>// 반드시 IN/OUT 명령어를 사용해야 함.
+<a href=#61 id=61 data-nosnippet>61</a>//
+<a href=#62 id=62 data-nosnippet>62</a>// 이것은 Memory-Mapped I/O (MMIO)와 대조됨.
+<a href=#63 id=63 data-nosnippet>63</a>// MMIO는 일반 메모리 주소 공간의 특정 범위를 하드웨어 레지스터에 매핑.
+<a href=#64 id=64 data-nosnippet>64</a>// (예: PCI Express BAR, LAPIC 레지스터)
+<a href=#65 id=65 data-nosnippet>65</a>
+<a href=#66 id=66 data-nosnippet>66</a></span><span class="doccomment">/// I/O 포트에 1바이트 쓰기 (x86 OUT 명령어)
+<a href=#67 id=67 data-nosnippet>67</a>///
+<a href=#68 id=68 data-nosnippet>68</a>/// # Safety
+<a href=#69 id=69 data-nosnippet>69</a>/// 잘못된 포트에 쓰면 하드웨어 오작동 가능.
+<a href=#70 id=70 data-nosnippet>70</a>/// 예: 0x70 포트(CMOS RTC)에 잘못된 값을 쓰면 시스템 시계가 망가짐.
+<a href=#71 id=71 data-nosnippet>71</a></span><span class="attr">#[inline]
+<a href=#72 id=72 data-nosnippet>72</a></span><span class="kw">unsafe fn </span>outb(port: u16, value: u8) {
+<a href=#73 id=73 data-nosnippet>73</a>	<span class="comment">// "out dx, al": dx 레지스터의 포트 번호로 al 레지스터의 값을 출력
+<a href=#74 id=74 data-nosnippet>74</a>	// options:
+<a href=#75 id=75 data-nosnippet>75</a>	//   nomem: 이 명령어가 메모리를 읽거나 쓰지 않음 (컴파일러 최적화 힌트)
+<a href=#76 id=76 data-nosnippet>76</a>	//   nostack: 스택 포인터를 변경하지 않음
+<a href=#77 id=77 data-nosnippet>77</a>	//   preserves_flags: EFLAGS 레지스터를 변경하지 않음
+<a href=#78 id=78 data-nosnippet>78</a>	// rax → 주로 계산 결과, 함수 반환값
+<a href=#79 id=79 data-nosnippet>79</a>	//rbx → 범용
+<a href=#80 id=80 data-nosnippet>80</a>	//rcx → 주로 반복 횟수 (loop 카운터)
+<a href=#81 id=81 data-nosnippet>81</a>	//rdx → 주로 포트 주소, 나눗셈 보조
+<a href=#82 id=82 data-nosnippet>82</a>	</span><span class="macro">core::arch::asm!</span>(
+<a href=#83 id=83 data-nosnippet>83</a>		<span class="string">"out dx, al"</span>,
+<a href=#84 id=84 data-nosnippet>84</a>		<span class="kw">in</span>(<span class="string">"dx"</span>) port,
+<a href=#85 id=85 data-nosnippet>85</a>		<span class="kw">in</span>(<span class="string">"al"</span>) value,
+<a href=#86 id=86 data-nosnippet>86</a>		options(nomem, nostack, preserves_flags)
+<a href=#87 id=87 data-nosnippet>87</a>	);
+<a href=#88 id=88 data-nosnippet>88</a>}
+<a href=#89 id=89 data-nosnippet>89</a>
+<a href=#90 id=90 data-nosnippet>90</a><span class="doccomment">/// I/O 포트에서 1바이트 읽기 (x86 IN 명령어)
+<a href=#91 id=91 data-nosnippet>91</a>///
+<a href=#92 id=92 data-nosnippet>92</a>/// # Safety
+<a href=#93 id=93 data-nosnippet>93</a>/// 잘못된 포트에서 읽으면 예측 불가능한 값 반환.
+<a href=#94 id=94 data-nosnippet>94</a></span><span class="attr">#[inline]
+<a href=#95 id=95 data-nosnippet>95</a></span><span class="kw">unsafe fn </span>inb(port: u16) -&gt; u8 {
+<a href=#96 id=96 data-nosnippet>96</a>	<span class="kw">let </span>value: u8;
+<a href=#97 id=97 data-nosnippet>97</a>	<span class="comment">// "in al, dx": dx 레지스터의 포트 번호에서 al 레지스터로 값을 읽음
+<a href=#98 id=98 data-nosnippet>98</a>	</span><span class="macro">core::arch::asm!</span>(
+<a href=#99 id=99 data-nosnippet>99</a>		<span class="string">"in al, dx"</span>,
+<a href=#100 id=100 data-nosnippet>100</a>		out(<span class="string">"al"</span>) value,
+<a href=#101 id=101 data-nosnippet>101</a>		<span class="kw">in</span>(<span class="string">"dx"</span>) port,
+<a href=#102 id=102 data-nosnippet>102</a>		options(nomem, nostack, preserves_flags)
+<a href=#103 id=103 data-nosnippet>103</a>	);
+<a href=#104 id=104 data-nosnippet>104</a>	value
+<a href=#105 id=105 data-nosnippet>105</a>}
+<a href=#106 id=106 data-nosnippet>106</a>
+<a href=#107 id=107 data-nosnippet>107</a><span class="comment">// ==================== UART 초기화 ====================
+<a href=#108 id=108 data-nosnippet>108</a>
+<a href=#109 id=109 data-nosnippet>109</a></span><span class="doccomment">/// UART 16550 초기화 시퀀스
+<a href=#110 id=110 data-nosnippet>110</a>///
+<a href=#111 id=111 data-nosnippet>111</a>/// 이 시퀀스는 UART 16550A 데이터시트를 따름.
+<a href=#112 id=112 data-nosnippet>112</a>/// 순서가 중요함 — 잘못된 순서로 설정하면 UART가 오동작함.
+<a href=#113 id=113 data-nosnippet>113</a></span><span class="kw">pub fn </span>init() {
+<a href=#114 id=114 data-nosnippet>114</a>	<span class="kw">unsafe </span>{
+<a href=#115 id=115 data-nosnippet>115</a>		<span class="comment">// ── 단계 1: 인터럽트 비활성화 ──────────────────────────────────
+<a href=#116 id=116 data-nosnippet>116</a>		// UART가 인터럽트를 발생시키기 전에 인터럽트 핸들러(IDT)를 설정해야 함.
+<a href=#117 id=117 data-nosnippet>117</a>		// 지금은 IDT가 없으므로 UART 인터럽트를 모두 끔.
+<a href=#118 id=118 data-nosnippet>118</a>		</span>outb(REG_IER, <span class="number">0x00</span>);
+<a href=#119 id=119 data-nosnippet>119</a>
+<a href=#120 id=120 data-nosnippet>120</a>		<span class="comment">// ── 단계 2: DLAB 활성화 (보드레이트 설정 모드) ─────────────────
+<a href=#121 id=121 data-nosnippet>121</a>		// LCR의 비트 7(DLAB)을 1로 설정하면 +0, +1 오프셋 레지스터가
+<a href=#122 id=122 data-nosnippet>122</a>		// 데이터/IER 대신 Divisor Latch(보드레이트 분주기)로 재매핑됨.
+<a href=#123 id=123 data-nosnippet>123</a>		</span>outb(REG_LCR, LCR_DLAB);
+<a href=#124 id=124 data-nosnippet>124</a>
+<a href=#125 id=125 data-nosnippet>125</a>		<span class="comment">// ── 단계 3: 보드레이트 설정 (115200 baud) ──────────────────────
+<a href=#126 id=126 data-nosnippet>126</a>		// UART 기준 클럭: 1.8432 MHz
+<a href=#127 id=127 data-nosnippet>127</a>		// 실제 보드레이트 = 기준 클럭 / (16 × Divisor)
+<a href=#128 id=128 data-nosnippet>128</a>		// 115200 = 1,843,200 / (16 × 1)  → Divisor = 1
+<a href=#129 id=129 data-nosnippet>129</a>		//
+<a href=#130 id=130 data-nosnippet>130</a>		// 다른 보드레이트:
+<a href=#131 id=131 data-nosnippet>131</a>		//   9600   baud → Divisor = 12 (0x000C)
+<a href=#132 id=132 data-nosnippet>132</a>		//   38400  baud → Divisor = 3  (0x0003)
+<a href=#133 id=133 data-nosnippet>133</a>		//   115200 baud → Divisor = 1  (0x0001)  ← 최고속도
+<a href=#134 id=134 data-nosnippet>134</a>		</span>outb(COM1 + <span class="number">0</span>, <span class="number">0x01</span>); <span class="comment">// Divisor Low  byte = 1
+<a href=#135 id=135 data-nosnippet>135</a>		</span>outb(COM1 + <span class="number">1</span>, <span class="number">0x00</span>); <span class="comment">// Divisor High byte = 0
+<a href=#136 id=136 data-nosnippet>136</a>
+<a href=#137 id=137 data-nosnippet>137</a>		// ── 단계 4: 데이터 포맷 설정 (DLAB 해제 + 8N1) ─────────────────
+<a href=#138 id=138 data-nosnippet>138</a>		// LCR = 0x03:
+<a href=#139 id=139 data-nosnippet>139</a>		//   비트 0-1: 11 = 데이터 8비트
+<a href=#140 id=140 data-nosnippet>140</a>		//   비트 2  :  0 = 정지비트 1개
+<a href=#141 id=141 data-nosnippet>141</a>		//   비트 3-5: 000 = 패리티 없음
+<a href=#142 id=142 data-nosnippet>142</a>		//   비트 7  :  0 = DLAB 해제 (다시 DATA/IER 레지스터로 복귀)
+<a href=#143 id=143 data-nosnippet>143</a>		//
+<a href=#144 id=144 data-nosnippet>144</a>		// 8N1이란? 8 data bits, No parity, 1 stop bit.
+<a href=#145 id=145 data-nosnippet>145</a>		// 가장 흔한 시리얼 통신 포맷.
+<a href=#146 id=146 data-nosnippet>146</a>		</span>outb(REG_LCR, LCR_8BIT);
+<a href=#147 id=147 data-nosnippet>147</a>
+<a href=#148 id=148 data-nosnippet>148</a>		<span class="comment">// ── 단계 5: FIFO 활성화 및 클리어 ──────────────────────────────
+<a href=#149 id=149 data-nosnippet>149</a>		// FCR = 0xC7:
+<a href=#150 id=150 data-nosnippet>150</a>		//   비트 0  : 1 = FIFO 활성화 (없으면 한 번에 1바이트만 버퍼)
+<a href=#151 id=151 data-nosnippet>151</a>		//   비트 1  : 1 = 수신 FIFO 클리어
+<a href=#152 id=152 data-nosnippet>152</a>		//   비트 2  : 1 = 송신 FIFO 클리어
+<a href=#153 id=153 data-nosnippet>153</a>		//   비트 6-7: 11 = 인터럽트 트리거 레벨 = 14바이트
+<a href=#154 id=154 data-nosnippet>154</a>		//             (FIFO에 14바이트 이상 쌓이면 인터럽트)
+<a href=#155 id=155 data-nosnippet>155</a>		</span>outb(REG_FCR, <span class="number">0xC7</span>);
+<a href=#156 id=156 data-nosnippet>156</a>
+<a href=#157 id=157 data-nosnippet>157</a>		<span class="comment">// ── 단계 6: Modem Control Register 설정 ─────────────────────────
+<a href=#158 id=158 data-nosnippet>158</a>		// MCR = 0x0B:
+<a href=#159 id=159 data-nosnippet>159</a>		//   비트 0: 1 = DTR (Data Terminal Ready) — "나 준비됐다"
+<a href=#160 id=160 data-nosnippet>160</a>		//   비트 1: 1 = RTS (Request To Send)     — "보내도 된다"
+<a href=#161 id=161 data-nosnippet>161</a>		//   비트 3: 1 = OUT2 (인터럽트 게이트 활성화 — IRQ4 연결)
+<a href=#162 id=162 data-nosnippet>162</a>		</span>outb(REG_MCR, <span class="number">0x0B</span>);
+<a href=#163 id=163 data-nosnippet>163</a>
+<a href=#164 id=164 data-nosnippet>164</a>		<span class="comment">// ── 단계 7: 루프백 자가진단 ─────────────────────────────────────
+<a href=#165 id=165 data-nosnippet>165</a>		// MCR 비트 4 = 1: 루프백 모드 (TX 출력이 내부적으로 RX로 연결됨)
+<a href=#166 id=166 data-nosnippet>166</a>		// 테스트 바이트를 보내고 동일한 값이 수신되는지 확인.
+<a href=#167 id=167 data-nosnippet>167</a>		// UART 하드웨어가 정상인지 체크.
+<a href=#168 id=168 data-nosnippet>168</a>		</span>outb(REG_MCR, <span class="number">0x1E</span>); <span class="comment">// 루프백 모드 활성화
+<a href=#169 id=169 data-nosnippet>169</a>		</span>outb(REG_DATA, <span class="number">0xAE</span>); <span class="comment">// 테스트 바이트 전송
+<a href=#170 id=170 data-nosnippet>170</a>
+<a href=#171 id=171 data-nosnippet>171</a>		// 수신된 값이 보낸 값과 같은지 확인
+<a href=#172 id=172 data-nosnippet>172</a>		// QEMU에서는 항상 성공. 실제 하드웨어에서는 실패할 수 있음.
+<a href=#173 id=173 data-nosnippet>173</a>		</span><span class="kw">if </span>inb(REG_DATA) != <span class="number">0xAE </span>{
+<a href=#174 id=174 data-nosnippet>174</a>		<span class="comment">// TODO: 하드웨어 없음 또는 고장 상태 처리
+<a href=#175 id=175 data-nosnippet>175</a>		// 지금은 그냥 계속 진행 (시리얼 없이도 커널은 동작해야 함)
+<a href=#176 id=176 data-nosnippet>176</a>		</span><span class="kw">return</span>;
+<a href=#177 id=177 data-nosnippet>177</a>		}
+<a href=#178 id=178 data-nosnippet>178</a>
+<a href=#179 id=179 data-nosnippet>179</a>		<span class="comment">// ── 단계 8: 정상 동작 모드 복귀 ─────────────────────────────────
+<a href=#180 id=180 data-nosnippet>180</a>		// MCR = 0x0F: 루프백 해제, OUT1 + OUT2 + RTS + DTR 모두 활성화
+<a href=#181 id=181 data-nosnippet>181</a>		</span>outb(REG_MCR, <span class="number">0x0F</span>);
+<a href=#182 id=182 data-nosnippet>182</a>	}
+<a href=#183 id=183 data-nosnippet>183</a>}
+<a href=#184 id=184 data-nosnippet>184</a>
+<a href=#185 id=185 data-nosnippet>185</a><span class="comment">// ==================== 바이트 출력 ====================
+<a href=#186 id=186 data-nosnippet>186</a>
+<a href=#187 id=187 data-nosnippet>187</a></span><span class="doccomment">/// 송신 버퍼가 비워질 때까지 스핀 대기 (Busy-Wait)
+<a href=#188 id=188 data-nosnippet>188</a>///
+<a href=#189 id=189 data-nosnippet>189</a>/// UART 16550의 최대 속도는 115200 baud ≈ 11,520 바이트/초 ≈ 87마이크로초/바이트.
+<a href=#190 id=190 data-nosnippet>190</a>/// 이전 바이트 전송이 끝나기 전에 새 바이트를 쓰면 덮어씌워짐.
+<a href=#191 id=191 data-nosnippet>191</a>///
+<a href=#192 id=192 data-nosnippet>192</a>/// LSR(Line Status Register)의 THRE 비트가 1이 되면 다음 바이트 쓰기 가능.
+<a href=#193 id=193 data-nosnippet>193</a>///
+<a href=#194 id=194 data-nosnippet>194</a>/// 스케줄러가 없는 지금은 바쁜 대기(busy-wait) 외에 방법이 없음.
+<a href=#195 id=195 data-nosnippet>195</a>/// 추후 DMA 또는 인터럽트 기반으로 교체 예정.
+<a href=#196 id=196 data-nosnippet>196</a></span><span class="attr">#[inline]
+<a href=#197 id=197 data-nosnippet>197</a></span><span class="kw">fn </span>wait_for_empty_transmit() {
+<a href=#198 id=198 data-nosnippet>198</a>	<span class="kw">unsafe </span>{
+<a href=#199 id=199 data-nosnippet>199</a>		<span class="comment">// LSR의 THRE(Transmit Holding Register Empty) 비트가 1이 될 때까지 폴링
+<a href=#200 id=200 data-nosnippet>200</a>		</span><span class="kw">while </span>(inb(REG_LSR) &amp; LSR_THRE) == <span class="number">0 </span>{
+<a href=#201 id=201 data-nosnippet>201</a>		<span class="comment">// 아무것도 안 하고 대기 (컴파일러 최적화로 루프가 제거되지 않도록
+<a href=#202 id=202 data-nosnippet>202</a>		// core::hint::spin_loop()를 넣는 것이 더 바람직하지만, 단순화를 위해 생략)
+<a href=#203 id=203 data-nosnippet>203</a>		</span>}
+<a href=#204 id=204 data-nosnippet>204</a>	}
+<a href=#205 id=205 data-nosnippet>205</a>}
+<a href=#206 id=206 data-nosnippet>206</a>
+<a href=#207 id=207 data-nosnippet>207</a><span class="doccomment">/// COM1에서 1바이트 논블로킹 읽기 — 데이터 없으면 None 즉시 반환
+<a href=#208 id=208 data-nosnippet>208</a></span><span class="kw">pub fn </span>try_read_byte() -&gt; <span class="prelude-ty">Option</span>&lt;u8&gt; {
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="kw">unsafe </span>{
+<a href=#210 id=210 data-nosnippet>210</a>        <span class="kw">if </span>inb(REG_LSR) &amp; LSR_DR != <span class="number">0 </span>{
+<a href=#211 id=211 data-nosnippet>211</a>            <span class="prelude-val">Some</span>(inb(REG_DATA))
+<a href=#212 id=212 data-nosnippet>212</a>        } <span class="kw">else </span>{
+<a href=#213 id=213 data-nosnippet>213</a>            <span class="prelude-val">None
+<a href=#214 id=214 data-nosnippet>214</a>        </span>}
+<a href=#215 id=215 data-nosnippet>215</a>    }
+<a href=#216 id=216 data-nosnippet>216</a>}
+<a href=#217 id=217 data-nosnippet>217</a>
+<a href=#218 id=218 data-nosnippet>218</a><span class="doccomment">/// COM1에서 1바이트 블로킹 읽기 (ALPHA 15 셸 stdin)
+<a href=#219 id=219 data-nosnippet>219</a>///
+<a href=#220 id=220 data-nosnippet>220</a>/// LSR.DR(Data Ready) 비트가 설정될 때까지 폴링 후 REG_DATA에서 읽음.
+<a href=#221 id=221 data-nosnippet>221</a>/// ring0에서 호출됨 — 타이머 IRQ는 계속 처리됨 (STI 상태).
+<a href=#222 id=222 data-nosnippet>222</a></span><span class="kw">pub fn </span>read_byte_blocking() -&gt; u8 {
+<a href=#223 id=223 data-nosnippet>223</a>    <span class="kw">unsafe </span>{
+<a href=#224 id=224 data-nosnippet>224</a>        <span class="kw">loop </span>{
+<a href=#225 id=225 data-nosnippet>225</a>            <span class="kw">if </span>inb(REG_LSR) &amp; LSR_DR != <span class="number">0 </span>{
+<a href=#226 id=226 data-nosnippet>226</a>                <span class="kw">return </span>inb(REG_DATA);
+<a href=#227 id=227 data-nosnippet>227</a>            }
+<a href=#228 id=228 data-nosnippet>228</a>            <span class="macro">core::arch::asm!</span>(<span class="string">"pause"</span>, options(nomem, nostack, preserves_flags));
+<a href=#229 id=229 data-nosnippet>229</a>        }
+<a href=#230 id=230 data-nosnippet>230</a>    }
+<a href=#231 id=231 data-nosnippet>231</a>}
+<a href=#232 id=232 data-nosnippet>232</a>
+<a href=#233 id=233 data-nosnippet>233</a><span class="doccomment">/// 1바이트를 시리얼 포트로 출력
+<a href=#234 id=234 data-nosnippet>234</a>///
+<a href=#235 id=235 data-nosnippet>235</a>/// `\n`을 `\r\n`으로 자동 변환:
+<a href=#236 id=236 data-nosnippet>236</a>/// 터미널은 CR(0x0D, 캐리지 리턴)이 없으면 다음 줄의 같은 열에서 시작함.
+<a href=#237 id=237 data-nosnippet>237</a>/// 즉, CR 없이 LF만 보내면 텍스트가 계단식으로 출력됨.
+<a href=#238 id=238 data-nosnippet>238</a></span><span class="kw">pub fn </span>write_byte(byte: u8) {
+<a href=#239 id=239 data-nosnippet>239</a>	<span class="kw">if </span>byte == <span class="string">b'\n' </span>{
+<a href=#240 id=240 data-nosnippet>240</a>		<span class="comment">// LF 전에 CR을 먼저 전송
+<a href=#241 id=241 data-nosnippet>241</a>		</span>wait_for_empty_transmit();
+<a href=#242 id=242 data-nosnippet>242</a>		<span class="kw">unsafe </span>{ outb(REG_DATA, <span class="string">b'\r'</span>) };
+<a href=#243 id=243 data-nosnippet>243</a>	}
+<a href=#244 id=244 data-nosnippet>244</a>	wait_for_empty_transmit();
+<a href=#245 id=245 data-nosnippet>245</a>	<span class="kw">unsafe </span>{ outb(REG_DATA, byte) };
+<a href=#246 id=246 data-nosnippet>246</a>}
+<a href=#247 id=247 data-nosnippet>247</a>
+<a href=#248 id=248 data-nosnippet>248</a><span class="comment">// ==================== fmt::Write 트레이트 구현 ====================
+<a href=#249 id=249 data-nosnippet>249</a>//
+<a href=#250 id=250 data-nosnippet>250</a>// fmt::Write를 구현하면 write!() / writeln!() 매크로를 사용할 수 있음.
+<a href=#251 id=251 data-nosnippet>251</a>// 또한 format_args!()를 통해 std의 println!과 동일한 포맷팅 문법 사용 가능.
+<a href=#252 id=252 data-nosnippet>252</a>
+<a href=#253 id=253 data-nosnippet>253</a></span><span class="doccomment">/// 시리얼 포트 출력 핸들 (zero-size type — 런타임 비용 없음)
+<a href=#254 id=254 data-nosnippet>254</a></span><span class="kw">pub struct </span>SerialWriter;
+<a href=#255 id=255 data-nosnippet>255</a>
+<a href=#256 id=256 data-nosnippet>256</a><span class="kw">impl </span>fmt::Write <span class="kw">for </span>SerialWriter {
+<a href=#257 id=257 data-nosnippet>257</a>	<span class="kw">fn </span>write_str(<span class="kw-2">&amp;mut </span><span class="self">self</span>, s: <span class="kw-2">&amp;</span>str) -&gt; fmt::Result {
+<a href=#258 id=258 data-nosnippet>258</a>		<span class="comment">// UTF-8 문자열을 바이트 단위로 순회하여 전송
+<a href=#259 id=259 data-nosnippet>259</a>		// 한국어 등 멀티바이트 문자는 각 바이트가 순서대로 전송됨
+<a href=#260 id=260 data-nosnippet>260</a>		// (터미널이 UTF-8을 지원하면 올바르게 표시됨)
+<a href=#261 id=261 data-nosnippet>261</a>		</span><span class="kw">for </span>byte <span class="kw">in </span>s.bytes() {
+<a href=#262 id=262 data-nosnippet>262</a>		write_byte(byte);
+<a href=#263 id=263 data-nosnippet>263</a>		}
+<a href=#264 id=264 data-nosnippet>264</a>		<span class="prelude-val">Ok</span>(())
+<a href=#265 id=265 data-nosnippet>265</a>	}
+<a href=#266 id=266 data-nosnippet>266</a>}
+<a href=#267 id=267 data-nosnippet>267</a>
+<a href=#268 id=268 data-nosnippet>268</a><span class="comment">// ==================== 내부 출력 함수 (매크로에서 호출) ====================
+<a href=#269 id=269 data-nosnippet>269</a>
+<a href=#270 id=270 data-nosnippet>270</a></span><span class="doccomment">/// format_args!()로 만들어진 포맷 인수를 시리얼로 출력
+<a href=#271 id=271 data-nosnippet>271</a>///
+<a href=#272 id=272 data-nosnippet>272</a>/// `pub`이어야 하는 이유: `#[macro_export]` 매크로는 크레이트 루트에서 확장되므로
+<a href=#273 id=273 data-nosnippet>273</a>/// 다른 모듈에서도 이 함수에 접근할 수 있어야 함.
+<a href=#274 id=274 data-nosnippet>274</a></span><span class="attr">#[doc(hidden)]
+<a href=#275 id=275 data-nosnippet>275</a></span><span class="kw">pub fn </span>_print(args: fmt::Arguments) {
+<a href=#276 id=276 data-nosnippet>276</a>	<span class="comment">// write_fmt: fmt::Write 트레이트의 메서드
+<a href=#277 id=277 data-nosnippet>277</a>	// format_args!()가 만든 인수를 SerialWriter.write_str()로 전달
+<a href=#278 id=278 data-nosnippet>278</a>	</span>SerialWriter.write_fmt(args).unwrap();
+<a href=#279 id=279 data-nosnippet>279</a>}
+<a href=#280 id=280 data-nosnippet>280</a>
+<a href=#281 id=281 data-nosnippet>281</a><span class="comment">// ==================== 공개 매크로 ====================
+<a href=#282 id=282 data-nosnippet>282</a>//
+<a href=#283 id=283 data-nosnippet>283</a>// `#[macro_export]`: 매크로를 크레이트 루트에 등록.
+<a href=#284 id=284 data-nosnippet>284</a>// 크레이트 내 어디서든 `serial_print!`, `serial_println!`으로 접근 가능.
+<a href=#285 id=285 data-nosnippet>285</a>// (import 불필요 — `use crate::serial_println;` 없이도 바로 사용)
+<a href=#286 id=286 data-nosnippet>286</a>//
+<a href=#287 id=287 data-nosnippet>287</a>// `$crate`: 매크로가 정의된 크레이트를 가리키는 특수 변수.
+<a href=#288 id=288 data-nosnippet>288</a>// `crate::` 대신 `$crate::` 를 쓰는 이유:
+<a href=#289 id=289 data-nosnippet>289</a>// 나중에 이 크레이트를 lib으로 분리해도 올바른 경로를 가리키게 하기 위함.
+<a href=#290 id=290 data-nosnippet>290</a>
+<a href=#291 id=291 data-nosnippet>291</a></span><span class="doccomment">/// 시리얼 포트에 포맷 문자열 출력 (줄바꿈 없음)
+<a href=#292 id=292 data-nosnippet>292</a>///
+<a href=#293 id=293 data-nosnippet>293</a>/// 사용법: `serial_print!("x = {}", x);`
+<a href=#294 id=294 data-nosnippet>294</a></span><span class="attr">#[macro_export]
+<a href=#295 id=295 data-nosnippet>295</a></span><span class="macro">macro_rules!</span> serial_print {
+<a href=#296 id=296 data-nosnippet>296</a>	($(<span class="macro-nonterminal">$arg</span>:tt)<span class="kw-2">*</span>) =&gt; {
+<a href=#297 id=297 data-nosnippet>297</a>		<span class="macro-nonterminal">$crate::serial::_print</span>(<span class="macro">format_args!</span>($(<span class="macro-nonterminal">$arg</span>)<span class="kw-2">*</span>))
+<a href=#298 id=298 data-nosnippet>298</a>	};
+<a href=#299 id=299 data-nosnippet>299</a>}
+<a href=#300 id=300 data-nosnippet>300</a>
+<a href=#301 id=301 data-nosnippet>301</a><span class="doccomment">/// 시리얼 포트에 포맷 문자열 출력 + 줄바꿈
+<a href=#302 id=302 data-nosnippet>302</a>///
+<a href=#303 id=303 data-nosnippet>303</a>/// 사용법: `serial_println!("Hello, {}!", name);`
+<a href=#304 id=304 data-nosnippet>304</a></span><span class="attr">#[macro_export]
+<a href=#305 id=305 data-nosnippet>305</a></span><span class="macro">macro_rules!</span> serial_println {
+<a href=#306 id=306 data-nosnippet>306</a>	<span class="comment">// 인수 없을 때: 빈 줄 출력
+<a href=#307 id=307 data-nosnippet>307</a>	</span>() =&gt; (<span class="macro-nonterminal">$crate::serial_print</span>!(<span class="string">"\n"</span>));
+<a href=#308 id=308 data-nosnippet>308</a>	<span class="comment">// 포맷 문자열 + 인수: 포맷 후 줄바꿈
+<a href=#309 id=309 data-nosnippet>309</a>	</span>(<span class="macro-nonterminal">$fmt</span>:expr) =&gt; (<span class="macro-nonterminal">$crate::serial_print</span>!(<span class="macro">concat!</span>(<span class="macro-nonterminal">$fmt</span>, <span class="string">"\n"</span>)));
+<a href=#310 id=310 data-nosnippet>310</a>	(<span class="macro-nonterminal">$fmt</span>:expr, $(<span class="macro-nonterminal">$arg</span>:tt)<span class="kw-2">*</span>) =&gt; (
+<a href=#311 id=311 data-nosnippet>311</a>		<span class="macro-nonterminal">$crate::serial_print</span>!(<span class="macro">concat!</span>(<span class="macro-nonterminal">$fmt</span>, <span class="string">"\n"</span>), $(<span class="macro-nonterminal">$arg</span>)<span class="kw-2">*</span>)
+<a href=#312 id=312 data-nosnippet>312</a>	);
+<a href=#313 id=313 data-nosnippet>313</a>}
+</code></pre></div></section></main></body></html>

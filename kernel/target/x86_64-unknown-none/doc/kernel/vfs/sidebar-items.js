@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["VfsNode"],"fn":["append_file","create_file","ext4_exists","ext4_list_dir","ext4_read_file","init","list_dir","lookup","mkdir","mount_ext4","read_file","split_parent","write_file"],"mod":["ext4fs","tmpfs"],"static":["EXT4","ROOT"],"struct":["DirEntry","SendableExt4"],"type":["NodeRef"]};

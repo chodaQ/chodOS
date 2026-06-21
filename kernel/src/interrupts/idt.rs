@@ -104,33 +104,44 @@ pub fn init() {
             isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31,
         ];
         for (vec, &stub) in stubs.iter().enumerate() {
-            IDT.0[vec].set(stub as u64, TRAP_GATE, 0);
+            IDT.0[vec].set(stub as *const () as u64, TRAP_GATE, 0);
         }
 
         // ── 하드웨어 IRQ: 인터럽트 게이트 ────────────────────────────────
         // 인터럽트 게이트: 핸들러 실행 중 IF=0 → 같은 IRQ 재진입 방지.
         // PIC 리매핑 후: IRQ0 → 벡터 0x20, IRQ1 → 벡터 0x21.
-        IDT.0[0x20].set(isr32 as u64, INT_GATE, 0); // IRQ0  = 타이머
-        IDT.0[0x21].set(isr33 as u64, INT_GATE, 0); // IRQ1  = 키보드
-        IDT.0[0x2C].set(isr44 as u64, INT_GATE, 0); // IRQ12 = 마우스 (PIC2)
+        IDT.0[0x20].set(isr32 as *const () as u64, INT_GATE, 0); // IRQ0  = 타이머
+        IDT.0[0x21].set(isr33 as *const () as u64, INT_GATE, 0); // IRQ1  = 키보드
+        IDT.0[0x2C].set(isr44 as *const () as u64, INT_GATE, 0); // IRQ12 = 마우스 (PIC2)
 
         // ── 자발적 양보: yield_now() = int 0x40 (ALPHA M1) ───────────────
         // INT_GATE, DPL=0: 커널 코드(ring0)만 발생 가능.
         // 인터럽트 게이트이므로 IF=0 → voluntary_yield 실행 중 재진입 방지.
-        IDT.0[0x40].set(isr64 as u64, INT_GATE, 0);
+        IDT.0[0x40].set(isr64 as *const () as u64, INT_GATE, 0);
 
         // ── 소프트웨어 인터럽트: syscall (벡터 0x80) ─────────────────────
         // TRAP_GATE_DPL3: ring3 코드가 `int 0x80`을 실행할 수 있게 DPL=3.
         // 트랩 게이트를 쓰는 이유: syscall 처리 중 타이머 인터럽트 허용.
-        IDT.0[0x80].set(isr128 as u64, TRAP_GATE_DPL3, 0);
+        IDT.0[0x80].set(isr128 as *const () as u64, TRAP_GATE_DPL3, 0);
 
         // ── IDTR 로드 ──────────────────────────────────────────────────────
         let idtr = IdtPointer {
             limit: (mem::size_of::<Idt>() - 1) as u16,
-            base:  IDT.0.as_ptr() as u64,
+            base:  core::ptr::addr_of!(IDT.0) as u64,
         };
         asm!("lidt [{}]", in(reg) &idtr, options(readonly, nostack, preserves_flags));
     }
 
     crate::serial_println!("[idt] IDT loaded (32 exceptions + IRQ0/IRQ1/IRQ12 + int 0x40/0x80)");
+}
+
+/// AP 전용: LIDT만 (IDT는 BSP가 이미 초기화)
+pub fn ap_load() {
+    unsafe {
+        let idtr = IdtPointer {
+            limit: (mem::size_of::<Idt>() - 1) as u16,
+            base:  core::ptr::addr_of!(IDT.0) as u64,
+        };
+        asm!("lidt [{}]", in(reg) &idtr, options(readonly, nostack, preserves_flags));
+    }
 }

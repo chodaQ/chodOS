@@ -16,6 +16,7 @@
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
+#![allow(dead_code)]
 
 extern crate alloc;
 
@@ -32,13 +33,16 @@ mod pci;
 mod policy;
 mod process;
 mod serial;
+mod signal;   // BETA 10: 시그널 서브시스템
+mod smp;
 mod syscall;
+mod term;
 mod vfs;
 mod virtio;
 mod wm;
 
 use core::sync::atomic::Ordering;
-use limine::request::{BootloaderInfoRequest, FramebufferRequest, HhdmRequest, MemmapRequest};
+use limine::request::{BootloaderInfoRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 // ==================== Limine 요청 ====================
@@ -57,6 +61,8 @@ static HHDM: HhdmRequest = HhdmRequest::new();
 static MEMMAP: MemmapRequest = MemmapRequest::new();
 #[used] #[link_section = ".requests"]
 static FB_REQ: FramebufferRequest = FramebufferRequest::new();
+#[used] #[link_section = ".requests"]
+static MP_REQ: MpRequest = MpRequest::new(0); // flags=0: xAPIC 모드 (x2APIC 비활성)
 
 // ==================== IPC 데모 프로세스 ====================
 
@@ -155,80 +161,10 @@ fn preempt_task_b() -> ! {
 //            BF 00 00 00 00  mov edi, 0      ; exit code
 //            CD 80           int 0x80        ; → longjmp
 // ```
-pub static ELF_TEST: &[u8] = &[
-    // ── ELF64 헤더 (64 bytes) ────────────────────────────────────────────
-    // e_ident
-    0x7F, b'E', b'L', b'F',     // magic
-    2,                            // EI_CLASS  = ELFCLASS64
-    1,                            // EI_DATA   = little-endian
-    1,                            // EI_VERSION
-    0,                            // EI_OSABI  = System V
-    0, 0, 0, 0, 0, 0, 0, 0,     // padding
-    // e_type = ET_EXEC (2)
-    2, 0,
-    // e_machine = EM_X86_64 (0x3E = 62)
-    0x3E, 0,
-    // e_version = 1
-    1, 0, 0, 0,
-    // e_entry = 0x400078
-    0x78, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // e_phoff = 0x40 (program header table at offset 64)
-    0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // e_shoff = 0 (no section headers)
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // e_flags = 0
-    0x00, 0x00, 0x00, 0x00,
-    // e_ehsize = 64
-    0x40, 0x00,
-    // e_phentsize = 56
-    0x38, 0x00,
-    // e_phnum = 1
-    0x01, 0x00,
-    // e_shentsize = 64
-    0x40, 0x00,
-    // e_shnum = 0
-    0x00, 0x00,
-    // e_shstrndx = 0
-    0x00, 0x00,
-
-    // ── PT_LOAD 프로그램 헤더 (56 bytes, offset 0x40) ────────────────────
-    // p_type = PT_LOAD (1)
-    0x01, 0x00, 0x00, 0x00,
-    // p_flags = PF_R|PF_X (5)
-    0x05, 0x00, 0x00, 0x00,
-    // p_offset = 0 (파일 처음부터 매핑)
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // p_vaddr = 0x400000
-    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // p_paddr = 0x400000
-    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // p_filesz = 181 = 0xB5
-    0xB5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // p_memsz = 0x1000 (1 페이지, BSS 포함)
-    0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // p_align = 0x1000
-    0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-
-    // ── 코드 + 데이터 (61 bytes, file offset 0x78 = vaddr 0x400078) ──────
-    // [0x400078] jmp short +16  → [0x40008A]
-    0xEB, 0x10,
-    // [0x40007A] "Hello from ELF!\n"  (16 bytes)
-    b'H', b'e', b'l', b'l', b'o', b' ', b'f', b'r',
-    b'o', b'm', b' ', b'E', b'L', b'F', b'!', b'\n',
-    // [0x40008A] sys_write(1, 0x40007A, 16)
-    0xB8, 0x01, 0x00, 0x00, 0x00,              // mov eax, 1
-    0xBF, 0x01, 0x00, 0x00, 0x00,              // mov edi, 1
-    0x48, 0x8D, 0x35, 0xDF, 0xFF, 0xFF, 0xFF,  // lea rsi, [rip-0x21]
-    0xBA, 0x10, 0x00, 0x00, 0x00,              // mov edx, 16
-    0xCD, 0x80,                                 // int 0x80
-    // [0x4000A2] sys_getpid()
-    0xB8, 0x27, 0x00, 0x00, 0x00,              // mov eax, 39
-    0xCD, 0x80,                                 // int 0x80
-    // [0x4000A9] sys_exit(0)
-    0xB8, 0x3C, 0x00, 0x00, 0x00,              // mov eax, 60
-    0xBF, 0x00, 0x00, 0x00, 0x00,              // mov edi, 0
-    0xCD, 0x80,                                 // int 0x80
-];
+// BETA 2-1: musl-static hello 바이너리로 교체 — Linux ABI 호환성 검증
+pub static ELF_TEST: &[u8] = include_bytes!(
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../build/musl_hello.elf")
+);
 
 // ==================== ALPHA 15: 내장 MuShell ELF ====================
 //
@@ -262,6 +198,17 @@ pub extern "C" fn _start() -> ! {
 
     // ── 3. 인터럽트 (GDT→IDT→PIC→STI) ─────────────────────────────────
     interrupts::init();
+
+    // ── 3.5. SMP: AP 시작 (BETA 5) ──────────────────────────────────────
+    serial_println!("===========================================");
+    serial_println!("  BETA 5: SMP (Symmetric Multi-Processing)");
+    serial_println!("===========================================");
+    if let Some(mp_resp) = MP_REQ.response() {
+        smp::init(mp_resp);
+    } else {
+        serial_println!("[smp] MpRequest not answered — single-core mode");
+    }
+    serial_println!("--- SMP init done ({} core(s)) ---\n", smp::cpu_count());
 
     // ── 4. 페이징 ─────────────────────────────────────────────────────────
     paging::init();
@@ -297,7 +244,7 @@ pub extern "C" fn _start() -> ! {
     {
         use alloc::vec::Vec;
         let sender_pid: process::Pid = 0; // kernel_main이 sender 역할
-        let receiver_pid: process::Pid = 99; // 가상 수신자 (데모용)
+        let _receiver_pid: process::Pid = 99; // 가상 수신자 (데모용)
 
         // 4KB 데이터를 공유 버퍼에 등록 (복사 없이 참조 전달)
         let mut payload: Vec<u8> = Vec::with_capacity(4096);

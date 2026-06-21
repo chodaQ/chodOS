@@ -42,6 +42,11 @@ pub fn try_pop() -> Option<u8> {
     Some(byte)
 }
 
+/// 버퍼에 데이터가 있는지 확인 (소비하지 않음) — select/poll/epoll용
+pub fn has_key() -> bool {
+    KBD.head.load(Ordering::Relaxed) != KBD.tail.load(Ordering::Relaxed)
+}
+
 /// 키보드 버퍼 또는 시리얼(COM1)에서 한 바이트를 블로킹으로 읽는다.
 pub fn read_key_blocking() -> u8 {
     loop {

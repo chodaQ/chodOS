@@ -36,7 +36,6 @@
 //! - Longjmp:    3회 syscall 후 커널 메인으로 복귀
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU32, Ordering};
 use crate::memory::{frame, hhdm_offset};
 use crate::interrupts::gdt;
 
@@ -106,7 +105,7 @@ unsafe fn table_at(phys: u64) -> &'static mut PageTable {
 /// - `vaddr`: 매핑할 가상 주소 (4KB 정렬이어야 함)
 /// - `paddr`: 매핑할 물리 주소 (4KB 정렬이어야 함)
 /// - `flags`: `PTE_WRITABLE`, `PTE_USER` 등 (PTE_PRESENT 자동 추가)
-pub unsafe fn map_4k(pml4: *mut PageTable, vaddr: u64, paddr: u64, flags: u64) {
+unsafe fn map_4k(pml4: *mut PageTable, vaddr: u64, paddr: u64, flags: u64) {
     // 가상 주소를 각 레벨의 9비트 인덱스로 분해
     let i4 = ((vaddr >> 39) & 0x1FF) as usize; // PML4 인덱스
     let i3 = ((vaddr >> 30) & 0x1FF) as usize; // PDPT 인덱스
@@ -177,8 +176,9 @@ pub fn init() {
 
         // TSS.RSP0 설정: ring3에서 인터럽트 발생 시 CPU가 사용할 스택
         // 스택은 높은 주소에서 낮은 방향으로 성장하므로 버퍼 최상단 설정
-        let rsp0 = USER_KERNEL_STACK.as_ptr().add(8192) as u64;
+        let rsp0 = core::ptr::addr_of!(USER_KERNEL_STACK).cast::<u8>().add(8192) as u64;
         gdt::set_tss_rsp0(rsp0);
+        crate::interrupts::init_syscall(rsp0);
     }
 
     crate::serial_println!("[paging] Kernel PML4 built and CR3 switched.");
@@ -212,14 +212,50 @@ pub fn init() {
 /// 4. KERNEL_MAIN_RSP 저장 (longjmp 복귀 지점)
 /// 5. IRETQ → ring3, 진입점 = ELF e_entry
 pub unsafe fn enter_elf(elf_data: &[u8]) -> ! {
-    use crate::elf::Elf64;
+    // ELF 로드 (PML4 생성 + 세그먼트 매핑 + 스택 셋업)
+    let (user_cr3, entry, user_sp) = load_elf_into_space(elf_data);
 
-    let elf = Elf64::parse(elf_data).expect("[elf] invalid ELF64 binary");
+    // BETA 9: per-process 커널 스택 생성 + TSS.RSP0 갱신
+    let pid = crate::process::scheduler::alloc_pid();
+    crate::process::userproc::register(pid, 0, user_cr3);
+
+    crate::serial_println!("[elf] entering ring3 pid={} entry={:#x} sp={:#x}", pid, entry, user_sp);
+
+    // ── KERNEL_MAIN_RSP 저장 ─────────────────────────────────────────────
+    asm!(
+        "mov [{save}], rsp",
+        save = in(reg) &raw mut KERNEL_MAIN_RSP,
+        options(nostack, preserves_flags),
+    );
+
+    // ── IRETQ: ring0 → ring3 ─────────────────────────────────────────────
+    asm!(
+        "mov cr3, {user_cr3}",
+        "push {ss}",
+        "push {user_sp}",
+        "push {flags}",
+        "push {cs}",
+        "push {user_ip}",
+        "iretq",
+        user_cr3 = in(reg) user_cr3,
+        ss       = in(reg) gdt::USER_SS_RPL3 as u64,
+        user_sp  = in(reg) user_sp,
+        flags    = in(reg) 0x202u64,
+        cs       = in(reg) gdt::USER_CS_RPL3 as u64,
+        user_ip  = in(reg) entry,
+        options(noreturn),
+    );
+}  // ← enter_elf 함수 본문은 여기서 끝 (아래는 분리된 헬퍼 함수들)
+
+/// ELF를 새 유저 주소 공간에 로드하고 (cr3, entry, user_rsp)를 반환.
+///
+/// enter_elf 및 userproc::exec_replace 모두 이 함수를 재사용.
+pub unsafe fn load_elf_into_space(elf_data: &[u8]) -> (u64, u64, u64) {
+    use crate::elf::Elf64;
+    let elf   = Elf64::parse(elf_data).expect("[elf] invalid ELF64");
     let entry = elf.entry();
 
-    crate::serial_println!("[elf] ELF64 parsed: entry={:#x}", entry);
-
-    // ── 유저 PML4 ────────────────────────────────────────────────────────
+    // 유저 PML4 생성
     let user_pml4 = alloc_table();
     let kpml4 = table_at(KERNEL_CR3 & !0xFFF);
     for i in 256..512usize {
@@ -276,38 +312,252 @@ pub unsafe fn enter_elf(elf_data: &[u8]) -> ! {
     }
 
     // ── 유저 스택 ─────────────────────────────────────────────────────────
+    // i=0: USER_STACK_TOP - 4096 ~ USER_STACK_TOP (가장 높은 페이지, argv/auxv 위치)
+    let mut stack_top_phys = 0u64;
     for i in 0..USER_STACK_PAGES {
         let phys  = frame::alloc_frame().expect("OOM: ELF stack page");
         let vaddr = USER_STACK_TOP - ((i + 1) as u64) * 4096;
         map_4k(user_pml4, vaddr, phys, PTE_WRITABLE | PTE_USER);
+        if i == 0 { stack_top_phys = phys; }
     }
 
-    crate::serial_println!("[elf] address space ready. entering ring3 at {:#x}...", entry);
+    // ── argv / envp / auxv 스택 셋업 ────────────────────────────────────
+    let user_sp = setup_elf_stack(stack_top_phys, hhdm_offset(), USER_STACK_TOP);
 
-    // ── KERNEL_MAIN_RSP 저장 ──────────────────────────────────────────────
-    asm!(
-        "mov [{save}], rsp",
-        save = in(reg) &raw mut KERNEL_MAIN_RSP,
-        options(nostack, preserves_flags),
-    );
+    crate::serial_println!("[elf] load_elf_into_space: cr3={:#x} entry={:#x} sp={:#x}",
+        user_cr3, entry, user_sp);
 
-    // ── IRETQ: ring0 → ring3 ─────────────────────────────────────────────
-    asm!(
-        "mov cr3, {user_cr3}",
-        "push {ss}",
-        "push {user_sp}",
-        "push {flags}",
-        "push {cs}",
-        "push {user_ip}",
-        "iretq",
-        user_cr3 = in(reg) user_cr3,
-        ss       = in(reg) gdt::USER_SS_RPL3 as u64,
-        user_sp  = in(reg) USER_STACK_TOP,
-        flags    = in(reg) 0x202u64,
-        cs       = in(reg) gdt::USER_CS_RPL3 as u64,
-        user_ip  = in(reg) entry,
-        options(noreturn),
-    );
+    (user_cr3, entry, user_sp)
+}
+
+/// 유저 주소 공간 전체 deep-copy (fork 시 사용).
+///
+/// - 유저 절반(PML4 인덱스 0-255)의 모든 4KB 물리 프레임을 새 프레임에 복사.
+/// - 커널 절반(256-511)은 KERNEL_CR3에서 공유.
+///
+/// 반환: 새 PML4의 물리 주소 (= new_cr3).
+pub unsafe fn clone_user_space(src_cr3: u64) -> u64 {
+    let new_pml4 = alloc_table();
+    let new_cr3  = new_pml4 as u64 - hhdm_offset();
+
+    // 커널 절반 공유
+    let kpml4 = table_at(KERNEL_CR3 & !0xFFF);
+    for i in 256..512usize {
+        (*new_pml4).0[i] = kpml4.0[i];
+    }
+
+    // 유저 절반 deep-copy
+    let src_pml4 = table_at(src_cr3 & !0xFFF);
+    for i4 in 0..256usize {
+        let pml4e = src_pml4.0[i4];
+        if pml4e & PTE_PRESENT == 0 { continue; }
+        let new_pdpt = alloc_table();
+        (*new_pml4).0[i4] = (new_pdpt as u64 - hhdm_offset()) | (pml4e & 0xFFF);
+
+        let src_pdpt = table_at(pml4e & !0xFFF);
+        for i3 in 0..512usize {
+            let pdpte = src_pdpt.0[i3];
+            if pdpte & PTE_PRESENT == 0 { continue; }
+            let new_pd = alloc_table();
+            (*new_pdpt).0[i3] = (new_pd as u64 - hhdm_offset()) | (pdpte & 0xFFF);
+
+            let src_pd = table_at(pdpte & !0xFFF);
+            for i2 in 0..512usize {
+                let pde = src_pd.0[i2];
+                if pde & PTE_PRESENT == 0 { continue; }
+                // 2MB 거대 페이지(PS 비트) → 그대로 공유 (읽기 전용 코드 세그먼트)
+                if pde & (1 << 7) != 0 {
+                    (*new_pd).0[i2] = pde;
+                    continue;
+                }
+                let new_pt = alloc_table();
+                (*new_pd).0[i2] = (new_pt as u64 - hhdm_offset()) | (pde & 0xFFF);
+
+                let src_pt = table_at(pde & !0xFFF);
+                for i1 in 0..512usize {
+                    let pte = src_pt.0[i1];
+                    if pte & PTE_PRESENT == 0 { continue; }
+                    // 새 물리 프레임 할당 + 내용 복사
+                    let src_phys = pte & !0xFFF;
+                    let dst_phys = frame::alloc_frame().expect("OOM: clone_user_space");
+                    let src_virt = src_phys + hhdm_offset();
+                    let dst_virt = dst_phys + hhdm_offset();
+                    core::ptr::copy_nonoverlapping(
+                        src_virt as *const u8,
+                        dst_virt as *mut u8,
+                        4096,
+                    );
+                    (*new_pt).0[i1] = dst_phys | (pte & 0xFFF);
+                }
+            }
+        }
+    }
+
+    crate::serial_println!("[paging] clone_user_space: src_cr3={:#x} → new_cr3={:#x}", src_cr3, new_cr3);
+    new_cr3
+}
+
+/// Linux _start ABI 스택 셋업.
+///
+/// 스택 레이아웃 (높은 주소 → 낮은 주소):
+/// ```
+/// USER_STACK_TOP
+///   [strings: "prog\0"]           ← 16-byte 정렬
+///   [auxv: AT_CLKTCK=17/100, AT_PAGESZ=6/4096, AT_NULL=0/0]
+///   [envp: NULL]
+///   [argv: ptr_to_prog, NULL]
+///   [argc = 1]                    ← new rsp
+/// ```
+///
+/// 물리 페이지(phys)가 유저 가상 [top-4096, top)에 매핑돼 있으므로
+/// HHDM을 통해 커널에서 직접 쓴다.
+unsafe fn setup_elf_stack(phys: u64, hhdm: u64, top: u64) -> u64 {
+    // HHDM 가상 주소로 페이지 접근
+    let page_hhdm = (hhdm + phys) as *mut u8;
+    // 유저 가상 주소: [top - 4096, top)
+    let page_ubase = top - 4096;
+
+    // cursor: 페이지 내 byte 오프셋 (top에서 내려감)
+    let mut cur: usize = 4096;
+
+    // ── 문자열 영역 ──────────────────────────────────────────────────────
+    // "prog\0"
+    let prog_str = b"prog\0";
+    cur -= prog_str.len();
+    core::ptr::copy_nonoverlapping(prog_str.as_ptr(), page_hhdm.add(cur), prog_str.len());
+    let prog_ptr: u64 = page_ubase + cur as u64;
+
+    // 16-byte 정렬
+    cur &= !0xF;
+
+    // ── write_u64 클로저 ─────────────────────────────────────────────────
+    macro_rules! push {
+        ($v:expr) => {{
+            cur -= 8;
+            *(page_hhdm.add(cur) as *mut u64) = $v as u64;
+        }};
+    }
+
+    // ── auxv (역순: 마지막 pair부터) ─────────────────────────────────────
+    push!(0u64);   // AT_NULL value
+    push!(0u64);   // AT_NULL key
+
+    push!(100u64); // AT_CLKTCK value
+    push!(17u64);  // AT_CLKTCK key
+
+    push!(4096u64);// AT_PAGESZ value
+    push!(6u64);   // AT_PAGESZ key
+
+    // ── envp ──────────────────────────────────────────────────────────────
+    push!(0u64);   // NULL (envp 끝)
+
+    // ── argv ──────────────────────────────────────────────────────────────
+    push!(0u64);      // NULL (argv 끝)
+    push!(prog_ptr);  // argv[0] → "prog"
+
+    // ── argc ──────────────────────────────────────────────────────────────
+    push!(1u64);   // argc = 1
+
+    page_ubase + cur as u64 // 새 rsp (유저 가상 주소)
+}
+
+// ── BETA 15: mmap / munmap 지원 ──────────────────────────────────────────────
+
+/// `cr3` 주소 공간에 `vaddr`부터 `data`를 매핑.
+///
+/// - 페이지 정렬된 vaddr 필요.
+/// - data가 페이지 경계를 넘으면 나머지는 0으로 채움.
+/// - writable=true → PTE_WRITABLE 추가.
+pub unsafe fn mmap_map(cr3: u64, vaddr: u64, data: &[u8], writable: bool) {
+    let pml4 = table_at(cr3 & !0xFFF);
+    let pages = (data.len() + 4095) / 4096;
+    let pages = if pages == 0 { 1 } else { pages };
+    let flags = PTE_USER | if writable { PTE_WRITABLE } else { 0 };
+
+    for i in 0..pages {
+        let phys = crate::memory::frame::alloc_frame().expect("OOM: mmap_map");
+        let virt = (phys + hhdm_offset()) as *mut u8;
+        core::ptr::write_bytes(virt, 0, 4096);
+
+        let page_data_start = i * 4096;
+        let page_data_end   = ((i + 1) * 4096).min(data.len());
+        if page_data_start < page_data_end {
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr().add(page_data_start),
+                virt,
+                page_data_end - page_data_start,
+            );
+        }
+        map_4k(pml4, vaddr + (i as u64) * 4096, phys, flags);
+    }
+}
+
+/// `cr3` 주소 공간에 `vaddr`부터 `count` 페이지를 0으로 익명 매핑.
+pub unsafe fn mmap_anon(cr3: u64, vaddr: u64, pages: usize, writable: bool) {
+    let pml4 = table_at(cr3 & !0xFFF);
+    let flags = PTE_USER | PTE_WRITABLE | if !writable { 0 } else { 0 }; // always writable for anon
+    let _ = writable;
+    let flags = PTE_USER | PTE_WRITABLE;
+    for i in 0..pages {
+        let phys = crate::memory::frame::alloc_frame().expect("OOM: mmap_anon");
+        let virt = (phys + hhdm_offset()) as *mut u8;
+        core::ptr::write_bytes(virt, 0, 4096);
+        map_4k(pml4, vaddr + (i as u64) * 4096, phys, flags);
+    }
+}
+
+/// `cr3` 주소 공간에서 `vaddr`의 물리 주소 조회.
+pub unsafe fn virt_to_phys(cr3: u64, vaddr: u64) -> Option<u64> {
+    let pml4 = table_at(cr3 & !0xFFF);
+    let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+    let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+    let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+    let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+
+    let pml4e = (*pml4).0[i4];
+    if pml4e & PTE_PRESENT == 0 { return None; }
+    let pdpt = table_at(pml4e & !0xFFF);
+    let pdpte = (*pdpt).0[i3];
+    if pdpte & PTE_PRESENT == 0 { return None; }
+    // 1GB 거대 페이지
+    if pdpte & (1 << 7) != 0 { return Some((pdpte & !0x3FFFFFFF) | (vaddr & 0x3FFFFFFF)); }
+    let pd = table_at(pdpte & !0xFFF);
+    let pde = (*pd).0[i2];
+    if pde & PTE_PRESENT == 0 { return None; }
+    // 2MB 거대 페이지
+    if pde & (1 << 7) != 0 { return Some((pde & !0x1FFFFF) | (vaddr & 0x1FFFFF)); }
+    let pt = table_at(pde & !0xFFF);
+    let pte = (*pt).0[i1];
+    if pte & PTE_PRESENT == 0 { return None; }
+    Some((pte & !0xFFF) | (vaddr & 0xFFF))
+}
+
+/// `cr3` 주소 공간에서 `vaddr`부터 `count` 페이지 언매핑 + 물리 프레임 해제.
+pub unsafe fn munmap_pages(cr3: u64, vaddr: u64, count: usize) {
+    for i in 0..count as u64 {
+        let va = vaddr + i * 4096;
+        if let Some(phys) = virt_to_phys(cr3, va) {
+            crate::memory::frame::free_frame(phys & !0xFFF);
+            // PTE를 0으로 클리어
+            let pml4 = table_at(cr3 & !0xFFF);
+            let i4 = ((va >> 39) & 0x1FF) as usize;
+            let i3 = ((va >> 30) & 0x1FF) as usize;
+            let i2 = ((va >> 21) & 0x1FF) as usize;
+            let i1 = ((va >> 12) & 0x1FF) as usize;
+            let pml4e = (*pml4).0[i4];
+            if pml4e & PTE_PRESENT == 0 { continue; }
+            let pdpt = table_at(pml4e & !0xFFF);
+            let pdpte = (*pdpt).0[i3];
+            if pdpte & PTE_PRESENT == 0 { continue; }
+            let pd = table_at(pdpte & !0xFFF);
+            let pde = (*pd).0[i2];
+            if pde & PTE_PRESENT == 0 { continue; }
+            let pt = table_at(pde & !0xFFF);
+            (*pt).0[i1] = 0;
+            // TLB 플러시 (단일 페이지)
+            core::arch::asm!("invlpg [{va}]", va = in(reg) va, options(nostack, preserves_flags));
+        }
+    }
 }
 
 pub unsafe fn enter_user_demo(code: &[u8]) -> ! {

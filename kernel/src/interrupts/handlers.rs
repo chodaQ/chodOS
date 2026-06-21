@@ -71,6 +71,17 @@ pub extern "C" fn exception_handler(frame: &ExceptionFrame) {
         v
     } else { 0 };
 
+    // BETA 10: 유저모드 폴트(CS & 3 == 3) → SIGSEGV/SIGBUS 전달 후 프로세스 종료
+    let is_user = frame.cs & 3 == 3;
+    if is_user && (vec == 14 || vec == 17) {
+        let sig = if vec == 14 { crate::signal::SIGSEGV } else { crate::signal::SIGBUS };
+        crate::serial_println!("\n[signal] user fault vec={} CR2={:#x} → sig={}", vec, cr2, sig);
+        crate::signal::raise_signal(sig);
+        // 유저 프로세스 종료 (핸들러가 없으면 default=terminate, 있어도 다음 syscall에서 전달)
+        // 즉각 종료로 단순화 (무한 폴트 루프 방지)
+        crate::syscall::sys_exit_impl(128 + sig as u64);
+    }
+
     crate::serial_println!("\n!!! CPU EXCEPTION !!!");
     crate::serial_println!("  vec={} ({})", vec, exception_name(vec));
     crate::serial_println!("  error_code = {:#x}", ec);
@@ -78,7 +89,6 @@ pub extern "C" fn exception_handler(frame: &ExceptionFrame) {
     crate::serial_println!("  CS     = {:#x}", frame.cs);
     crate::serial_println!("  RFLAGS = {:#x}", frame.rflags);
     if vec == 14 {
-        // 에러 코드 비트: P(존재), W(쓰기), U(유저), I(명령어 fetch)
         crate::serial_println!("  CR2    = {:#018x}  (폴트 주소)", cr2);
         crate::serial_println!("  PF flags: P={} W={} U={} I={}",
             ec & 1, (ec >> 1) & 1, (ec >> 2) & 1, (ec >> 4) & 1);
@@ -191,6 +201,13 @@ pub static USER_SYSCALL_COUNT: AtomicU32 = AtomicU32::new(0);
 /// ring3 프로세스가 `sys_exit(code)`를 호출할 때 저장되는 종료 코드
 pub static USER_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
+/// `syscall` 인스트럭션 진입 시 유저 RSP 임시 저장 (LSTAR 핸들러용)
+#[no_mangle]
+pub static mut syscall_user_rsp: u64 = 0;
+/// `syscall` 인스트럭션 핸들러가 사용할 커널 RSP (= TSS.RSP0)
+#[no_mangle]
+pub static mut syscall_kern_rsp: u64 = 0;
+
 /// int 0x80 syscall 디스패처 (ALPHA 13)
 ///
 /// `isr128` 스텁이 9개 레지스터를 push한 직후 RSP를 이 함수에 인수로 전달.
@@ -206,7 +223,12 @@ pub static USER_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 #[no_mangle]
 pub extern "C" fn syscall_dispatch(frame_rsp: u64) -> i64 {
     USER_SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
-    crate::syscall::dispatch(frame_rsp as *const u64)
+    let ret = crate::syscall::dispatch(frame_rsp as *const u64);
+    // BETA 10: syscall 완료 후 frame[0x40]에 반환값 선기록 → 시그널 전달 시 sigframe에 올바른 rax 저장
+    unsafe { *((frame_rsp + 0x40) as *mut i64) = ret; }
+    // pending 시그널 전달 (isr128 IRETQ 직전)
+    crate::signal::deliver_pending_signals(frame_rsp);
+    ret
 }
 
 /// 실행 대기 중인 패키지 인덱스 (ALPHA 16)
@@ -263,22 +285,22 @@ pub extern "C" fn after_user_demo() -> ! {
             crate::serial_println!("===========================================");
             crate::serial_println!("[shell] loading mushell ({} bytes)...",
                 crate::MUSHELL_ELF.len());
+            crate::syscall::fd::init(); // BETA 4: fd 테이블 초기화
             unsafe { crate::paging::enter_elf(crate::MUSHELL_ELF); }
         }
         _ => {
             // Phase 2+: mushell 또는 패키지 종료
-            // Phase를 2로 고정 — 이 브랜치를 계속 사용
             PHASE.store(2, Ordering::Relaxed);
 
             let pkg_idx = PENDING_PKG_IDX.swap(-1, Ordering::Relaxed);
             if pkg_idx >= 0 {
-                // sys_execve가 요청한 패키지 실행
                 let pkg = &crate::pkg::PACKAGES[pkg_idx as usize];
                 crate::serial_println!("[mukg] running {} v{} ({} bytes)...",
                     pkg.name, pkg.version, pkg.elf.len());
+                crate::syscall::fd::init(); // BETA 4
                 unsafe { crate::paging::enter_elf(pkg.elf); }
             } else {
-                // 패키지 종료 후 또는 직접 종료 → mushell 재시작
+                crate::syscall::fd::init(); // BETA 4
                 unsafe { crate::paging::enter_elf(crate::MUSHELL_ELF); }
             }
         }
@@ -516,6 +538,52 @@ core::arch::global_asm!(
     ".global isr30", "isr30:",           "push 30", "jmp exception_common",
     ".global isr31", "isr31:", "push 0", "push 31", "jmp exception_common",
 
+    // ── syscall_entry: `syscall` 인스트럭션 핸들러 (LSTAR) ───────────────
+    //
+    // CPU가 `syscall` 실행 시:
+    //   RCX ← 복귀 RIP, R11 ← 유저 RFLAGS, RSP ← 그대로(유저 RSP!)
+    //   CS  ← STAR[47:32] (커널 코드), RFLAGS &= ~FMASK
+    //
+    // isr128(int 0x80)과 동일한 9-push 프레임을 구성해 syscall_dispatch 재사용.
+    // 복귀는 SYSRETQ 대신 IRETQ 사용 (GDT STAR[63:48] 정렬 불필요).
+    ".global syscall_entry",
+    "syscall_entry:",
+    // 유저 RSP 저장 + 커널 스택으로 전환 (RIP-relative: 커널 상위 절반 주소)
+    "mov [rip + syscall_user_rsp], rsp",
+    "mov rsp, [rip + syscall_kern_rsp]",
+    // isr128과 동일한 순서로 push → syscall_dispatch frame 재사용
+    "push rax",   // [rsp+0x40] = syscall nr
+    "push rcx",   // [rsp+0x38] = 복귀 RIP (dispatch에서 미사용)
+    "push rdx",   // [rsp+0x30] = arg3
+    "push rsi",   // [rsp+0x28] = arg2
+    "push rdi",   // [rsp+0x20] = arg1
+    "push r8",    // [rsp+0x18] = arg5
+    "push r9",    // [rsp+0x10] = arg6
+    "push r10",   // [rsp+0x08] = arg4
+    "push r11",   // [rsp+0x00] = 유저 RFLAGS (dispatch에서 미사용)
+    "mov rdi, rsp",
+    "call syscall_dispatch",
+    "mov [rsp + 0x40], rax",   // rax 슬롯에 반환값 덮어씀
+    // 복원
+    "pop r11",   // 유저 RFLAGS (IRETQ에 사용)
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",   // 복귀 RIP (IRETQ에 사용)
+    "pop rax",   // syscall 반환값
+    // r10을 user_rsp 로드에 임시 사용 (caller-saved이므로 무방)
+    "mov r10, [rip + syscall_user_rsp]",
+    // IRETQ 프레임 구성 (ring3 복귀)
+    "push 0x33",   // SS  = USER_SS_RPL3
+    "push r10",    // RSP = 유저 RSP
+    "push r11",    // RFLAGS
+    "push 0x2b",   // CS  = USER_CS_RPL3
+    "push rcx",    // RIP = 복귀 주소
+    "iretq",
+
     // ── isr128: int 0x80 syscall (벡터 0x80) — ALPHA 13 ─────────────────
     //
     // ring3 → ring0 전환: CPU가 스택에 SS,RSP,RFLAGS,CS,RIP(5개=40B) push.
@@ -546,4 +614,15 @@ core::arch::global_asm!(
     "pop rdi",  "pop rsi",
     "pop rdx",  "pop rcx", "pop rax", // rax = syscall 반환값
     "iretq",     // ring3 (사용자 코드)로 복귀
+
+    // ── up_iretq_from_frame: BETA 9 fork/wait4 ring3 복귀 루틴 ───────────
+    //
+    // userproc::iretq_to_frame()이 RSP를 isr128 프레임으로 설정한 뒤 여기로 점프.
+    // isr128의 pop+iretq 시퀀스를 재사용 → fork 자식/wait4 재개 모두 동일 경로.
+    ".global up_iretq_from_frame",
+    "up_iretq_from_frame:",
+    "pop r11", "pop r10", "pop r9",  "pop r8",
+    "pop rdi",  "pop rsi",
+    "pop rdx",  "pop rcx", "pop rax",
+    "iretq",
 );

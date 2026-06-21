@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["alloc_size","avail_off","used_off"],"struct":["Queue"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COLS","ROWS","TOTAL"],"fn":["cell","render_at","repaint","scroll_up","write_byte","write_bytes"],"static":["ESC_STATE","TERM_BUF","TERM_COL","TERM_ROW"]};
