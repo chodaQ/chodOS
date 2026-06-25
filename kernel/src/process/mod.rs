@@ -47,6 +47,7 @@ pub mod context;
 pub mod handle;
 pub mod ipc;
 pub mod ipc_cap;
+pub mod ipc_fast; // BETA-X 2: 동적 fast channel 레지스트리
 pub mod scheduler;
 pub mod userproc; // BETA 9: fork/exec/wait4
 
@@ -118,6 +119,8 @@ pub struct Message {
     pub len: usize,
     /// 64바이트 고정 페이로드
     pub data: [u8; 64],
+    /// BETA-X 2: 0 = 일반 메시지, >0 = fast channel CapId (데이터는 SharedBuffer에 있음)
+    pub fast_cap: u64,
 }
 
 /// 프로세스 제어 블록 (PCB)
@@ -146,6 +149,16 @@ pub struct Process {
     // ── ALPHA 9: Capability Handle Table ─────────────────────────────────────
     /// Linux fd ↔ Handle ↔ Capability<T> 연결 테이블
     pub handle_table: handle::HandleTable,
+
+    // ── BETA-X 5: Core Affinity ───────────────────────────────────────────────
+    /// 선호 CPU 코어 (0=BSP, u8::MAX=미설정). Policy Engine이 hot pair에 배정.
+    pub preferred_cpu: u8,
+
+    // ── BETA-X 1: IPC 빈도 계측 (voluntary_yield/forced_preempt와 같은 자리) ──
+    /// 최근 IPC 수신자 PID (최대 8개, count=0이면 미사용)
+    pub ipc_peer_pids: [Pid; 8],
+    /// ipc_peer_pids[i]에게 보낸 메시지 누적 횟수
+    pub ipc_peer_counts: [u64; 8],
 }
 
 impl Process {
@@ -201,6 +214,9 @@ impl Process {
             boost_ticks: 0,
             ready_since_tick: 0,
             handle_table: handle::HandleTable::new(),
+            preferred_cpu: u8::MAX, // 미설정
+            ipc_peer_pids: [0; 8],
+            ipc_peer_counts: [0; 8],
         }
     }
 
@@ -218,6 +234,38 @@ impl Process {
             boost_ticks: 0,
             ready_since_tick: 0,
             handle_table: handle::HandleTable::new(),
+            preferred_cpu: 0, // kernel_main은 BSP(core 0) 고정
+            ipc_peer_pids: [0; 8],
+            ipc_peer_counts: [0; 8],
         }
+    }
+
+    /// BETA-X 1: IPC 송신 카운터 갱신 — 수신자 PID별 누적 횟수 반환.
+    pub fn record_ipc_send(&mut self, to: Pid) -> u64 {
+        // 기존 슬롯 검색
+        for i in 0..8 {
+            if self.ipc_peer_counts[i] > 0 && self.ipc_peer_pids[i] == to {
+                self.ipc_peer_counts[i] = self.ipc_peer_counts[i].saturating_add(1);
+                return self.ipc_peer_counts[i];
+            }
+        }
+        // 빈 슬롯(count=0) 사용
+        for i in 0..8 {
+            if self.ipc_peer_counts[i] == 0 {
+                self.ipc_peer_pids[i] = to;
+                self.ipc_peer_counts[i] = 1;
+                return 1;
+            }
+        }
+        // 슬롯 가득 참 — 최소 카운트 슬롯 교체
+        let mut min_i = 0;
+        for i in 1..8 {
+            if self.ipc_peer_counts[i] < self.ipc_peer_counts[min_i] {
+                min_i = i;
+            }
+        }
+        self.ipc_peer_pids[min_i] = to;
+        self.ipc_peer_counts[min_i] = 1;
+        1
     }
 }

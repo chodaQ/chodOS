@@ -83,6 +83,20 @@ pub fn alloc_shared(owner: Pid, data: Vec<u8>) -> CapId {
     id
 }
 
+/// 공유 버퍼 내용을 새 데이터로 교체 (BETA-X 2 fast channel 재사용).
+///
+/// 기존 Vec을 clear 후 extend — 버퍼 재할당 없이 내용만 갱신.
+pub fn overwrite_shared(id: CapId, data: &[u8]) -> bool {
+    let mut table = SHARED_BUFFERS.lock();
+    if let Some(buf) = table.get_mut(&id) {
+        buf.data.clear();
+        buf.data.extend_from_slice(data);
+        true
+    } else {
+        false
+    }
+}
+
 /// 공유 버퍼에 데이터를 복사 없이 추가 (append).
 ///
 /// 버퍼가 존재하지 않으면 false 반환.

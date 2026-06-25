@@ -39,15 +39,23 @@ use super::{Message, Pid};
 pub fn send(to: Pid, data: &[u8]) -> bool {
     let sender = scheduler::current_pid();
 
-    // 메시지 구성 (64바이트 고정 크기 페이로드로 복사)
+    // BETA-X 2: fast channel이 있으면 SharedBuffer에 기록 후 sentinel 전송
+    if let Some(cap_id) = super::ipc_fast::get_channel(sender, to) {
+        if super::ipc_fast::write_fast(cap_id, data) {
+            let msg = Message { sender, len: 0, data: [0u8; 64], fast_cap: cap_id };
+            return scheduler::send_msg(to, msg);
+        }
+        // write 실패 시 (CapId 만료) 일반 경로로 fallback
+    }
+
+    // 일반 경로: 64바이트 인라인 복사
     let mut msg = Message {
         sender,
         len: data.len().min(64),
         data: [0u8; 64],
+        fast_cap: 0,
     };
     msg.data[..msg.len].copy_from_slice(&data[..msg.len]);
-
-    // 스케줄러를 통해 수신자 큐에 push
     scheduler::send_msg(to, msg)
 }
 
@@ -71,7 +79,25 @@ pub fn send(to: Pid, data: &[u8]) -> bool {
 /// }
 /// ```
 pub fn recv() -> Option<Message> {
-    scheduler::recv_msg()
+    let msg = scheduler::recv_msg()?;
+
+    // BETA-X 2: fast channel 알림 → SharedBuffer에서 실제 데이터를 투명하게 채움
+    if msg.fast_cap != 0 {
+        let filled = super::ipc_cap::read_shared(msg.fast_cap, |data| {
+            let mut m = Message {
+                sender: msg.sender,
+                len: data.len().min(64),
+                data: [0u8; 64],
+                fast_cap: msg.fast_cap, // 보존: 64B 초과 데이터는 직접 read_shared 사용
+            };
+            m.data[..m.len].copy_from_slice(&data[..m.len]);
+            m
+        });
+        // SharedBuffer가 이미 해제됐으면 sentinel 그대로 반환 (안전 fallback)
+        return Some(filled.unwrap_or(msg));
+    }
+
+    Some(msg)
 }
 
 /// u64 값을 IPC 메시지로 전송하는 헬퍼

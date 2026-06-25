@@ -32,6 +32,8 @@ pub fn push_key(ascii: u8) {
     if next == KBD.head.load(Ordering::Relaxed) { return; } // 버퍼 풀
     KBD.buf[tail].store(ascii, Ordering::Relaxed);
     KBD.tail.store(next, Ordering::Relaxed);
+    // BETA-X 4: 포그라운드 앱 직통 경로에도 push (IRQ-safe AtomicU64 링 버퍼)
+    crate::input_direct::push_key(ascii);
 }
 
 pub fn try_pop() -> Option<u8> {

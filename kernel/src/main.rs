@@ -20,8 +20,11 @@
 
 extern crate alloc;
 
+mod bench_ipc;    // BETA-X 7: IPC 레이턴시 A/B 벤치마크
 mod elf;
 mod fb;
+mod gfx_ipc;     // BETA-X 3: WM ↔ GFX 드라이버 IPC 채널 시연
+mod input_direct; // BETA-X 4: 입력 경로 직통화
 mod interrupts;
 mod kbd;
 mod mouse;
@@ -41,7 +44,7 @@ mod vfs;
 mod virtio;
 mod wm;
 
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 use limine::request::{BootloaderInfoRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
@@ -119,6 +122,34 @@ fn preempt_task_b() -> ! {
             serial_println!("[task_b] running... (loop #{})", i / 5_000_000);
         }
     }
+}
+
+// ==================== BETA-X 6: 채널 회수(Decay) 데모 ====================
+
+static DECAY_RECV_PID: AtomicU64 = AtomicU64::new(0);
+
+fn decay_recv_task() -> ! {
+    DECAY_RECV_PID.store(process::scheduler::current_pid(), Ordering::Relaxed);
+    loop {
+        while let Some(_) = process::ipc::recv() {}
+        process::scheduler::yield_now();
+    }
+}
+
+fn decay_send_task() -> ! {
+    // 수신자 PID 대기
+    let recv = loop {
+        let p = DECAY_RECV_PID.load(Ordering::Relaxed);
+        if p != 0 { break p; }
+        process::scheduler::yield_now();
+    };
+    // 130회 버스트 → IPC_HOT_THRESHOLD(100) 초과 → fast channel 생성 트리거
+    for i in 0u8..130 {
+        process::ipc::send(recv, &[i]);
+    }
+    serial_println!("[decay-send] 130회 송신 완료 → 이후 침묵 (cold 카운트 시작)");
+    // 이후 메시지 없음 → Policy Engine이 cold 창 감지 → 채널 회수
+    loop { process::scheduler::yield_now(); }
 }
 
 // ==================== ALPHA 14: 내장 테스트 ELF 바이너리 ====================
@@ -686,6 +717,154 @@ pub extern "C" fn _start() -> ! {
         serial_println!("       {}{}", entry.name, if entry.is_dir { "/" } else { "" });
     }
     serial_println!("--- VFS demo complete ---\n");
+
+    // ── BETA-X 3: WM ↔ GFX 드라이버 동적 IPC 채널 시연 ─────────────────────
+    serial_println!("===========================================");
+    serial_println!("  BETA-X 3: WM <-> GFX 드라이버 fast channel");
+    serial_println!("  Phase1: 일반 IPC 120회 → 임계값 초과");
+    serial_println!("  Phase2: Policy Engine 자동 채널 생성 → fast path");
+    serial_println!("===========================================");
+
+    // GFX 태스크 먼저 스폰 (PID를 GFX_PID 전역에 등록)
+    let gfx_pid_val = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(gfx_pid_val, "gfx_drv", gfx_ipc::gfx_task)
+    );
+    // WM 태스크 스폰 (GFX_PID 전역 읽어 gfx_pid 확인 후 전송 시작)
+    let wm_pid_val = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(wm_pid_val, "wm_task", gfx_ipc::wm_task)
+    );
+
+    // Policy Engine 리포트 주기(36틱 ≈ 2초)의 두 배 대기
+    // → adapt_and_report 최소 1회 이상 실행 보장 → fast channel 생성 확인
+    let betax3_start = interrupts::handlers::TICK.load(Ordering::Relaxed);
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - betax3_start < 72 {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+
+    let ch_count = process::ipc_fast::channel_count();
+    serial_println!(
+        "[beta-x3] 완료: fast channels={} ({})",
+        ch_count,
+        if ch_count > 0 { "fast path 활성화 확인 ✓" } else { "Policy Engine 리포트 미발생" },
+    );
+    process::scheduler::kill_pid(gfx_pid_val);
+    process::scheduler::kill_pid(wm_pid_val);
+    serial_println!("--- BETA-X 3 demo complete ---\n");
+
+    // ── BETA-X 4: 마우스/키보드 → 포그라운드 앱 입력 경로 직통화 ─────────────
+    serial_println!("===========================================");
+    serial_println!("  BETA-X 4: 입력 직통 경로 (Input Direct Path)");
+    serial_println!("  IRQ → AtomicRing → input_drv → fast channel → foreground");
+    serial_println!("===========================================");
+
+    // 1) 포그라운드 앱 (수신자) 먼저 스폰 → FOREGROUND_PID 등록
+    let inp_consumer = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(inp_consumer, "input_app", input_direct::input_consumer_task)
+    );
+    // 2) 입력 드라이버 태스크 스폰 → INPUT_DRV_PID 등록
+    let inp_drv = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(inp_drv, "input_drv", input_direct::input_drv_task)
+    );
+    // 3) 합성 이벤트 생성기 스폰 (실제 키 입력 없이도 threshold 돌파)
+    let key_gen = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(key_gen, "key_gen", input_direct::key_gen_task)
+    );
+
+    // Policy Engine adapt_and_report × 2회 이상 실행 대기 (72틱 ≈ 4초)
+    let betax4_start = interrupts::handlers::TICK.load(Ordering::Relaxed);
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - betax4_start < 72 {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+
+    let inp_channels = process::ipc_fast::channel_count();
+    serial_println!(
+        "[beta-x4] 완료: fast channels={} ({})",
+        inp_channels,
+        if inp_channels > 0 { "입력 직통 fast path 확인 ✓" } else { "Policy Engine 리포트 미발생" },
+    );
+    process::scheduler::kill_pid(inp_consumer);
+    process::scheduler::kill_pid(inp_drv);
+    process::scheduler::kill_pid(key_gen);
+    serial_println!("--- BETA-X 4 demo complete ---\n");
+
+    // ── BETA-X 6: 채널 회수(Decay) ────────────────────────────────────────────
+    serial_println!("===========================================");
+    serial_println!("  BETA-X 6: 채널 회수 (Decay)");
+    serial_println!("  130회 버스트 → fast channel 생성");
+    serial_println!("  이후 침묵 → cold {} 창 → 자동 채널 해제", 2u8);
+    serial_println!("===========================================");
+
+    DECAY_RECV_PID.store(0, Ordering::Relaxed);
+
+    let decay_recv = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(decay_recv, "decay_recv", decay_recv_task)
+    );
+    let decay_send = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(decay_send, "decay_send", decay_send_task)
+    );
+
+    // 1창(36틱) 대기 → Policy Engine이 hot pair 감지 → fast channel 생성
+    let betax6_ch_wait = interrupts::handlers::TICK.load(Ordering::Relaxed);
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - betax6_ch_wait < 40 {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+    serial_println!(
+        "[beta-x6] 채널 생성 후: fast_channels={} affinity={}",
+        process::ipc_fast::channel_count(),
+        smp::affinity_count(),
+    );
+
+    // 2창(72틱) 추가 대기 → DECAY_COLD_WINDOWS=2 충족 → 채널 회수
+    let betax6_decay_wait = interrupts::handlers::TICK.load(Ordering::Relaxed);
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - betax6_decay_wait < 80 {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+    serial_println!(
+        "[beta-x6] 채널 회수 후: fast_channels={} affinity={}",
+        process::ipc_fast::channel_count(),
+        smp::affinity_count(),
+    );
+
+    process::scheduler::kill_pid(decay_recv);
+    process::scheduler::kill_pid(decay_send);
+    serial_println!("--- BETA-X 6 demo complete ---\n");
+
+    // ── BETA-X 7: IPC 레이턴시 A/B 벤치마크 ─────────────────────────────────
+    serial_println!("===========================================");
+    serial_println!("  BETA-X 7: IPC 레이턴시 A/B 벤치마크");
+    serial_println!("  Phase A: 일반 IPC  Phase B: fast channel");
+    serial_println!("  rdtsc(send)→rdtsc(recv) 사이클 측정 n={}", bench_ipc::BENCH_N);
+    serial_println!("===========================================");
+
+    let b7_recv = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(b7_recv, "bench_recv", bench_ipc::bench_receiver_task)
+    );
+    let b7_send = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(b7_send, "bench_send", bench_ipc::bench_sender_task)
+    );
+
+    // Phase 3(완료) + 전체 샘플 수집 대기
+    loop {
+        let phase = bench_ipc::BENCH_PHASE.load(Ordering::Relaxed);
+        let idx   = bench_ipc::BENCH_IDX.load(Ordering::Relaxed);
+        if phase >= 3 && idx >= bench_ipc::BENCH_N * 2 { break; }
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+
+    bench_ipc::report();
+
+    process::scheduler::kill_pid(b7_recv);
+    process::scheduler::kill_pid(b7_send);
+    serial_println!("--- BETA-X 7 demo complete ---\n");
 
     // ── ALPHA 13 → 14 연속 데모 ──────────────────────────────────────────────
     //

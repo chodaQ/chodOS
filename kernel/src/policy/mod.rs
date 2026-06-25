@@ -58,6 +58,37 @@ impl CpuStats {
 
 const MAX_PROCS: usize = 32;
 
+// ── BETA-X 1: IPC 빈도 추적 ──────────────────────────────────────────────────
+
+#[derive(Copy, Clone)]
+struct IpcEntry {
+    from: Pid,
+    to: Pid,
+    count: u64,
+    active: bool,
+    /// BETA-X 6: 마지막 리포트 창 기준 누적 카운트 (델타 계산용)
+    last_count: u64,
+    /// BETA-X 6: 연속 cold 창 수 (이 횟수가 DECAY_COLD_WINDOWS 이상이면 채널 회수)
+    cold_windows: u8,
+}
+
+impl IpcEntry {
+    const fn empty() -> Self {
+        IpcEntry { from: 0, to: 0, count: 0, active: false, last_count: 0, cold_windows: 0 }
+    }
+}
+
+/// IPC 핫-쌍 임계값: 이 횟수 이상이면 전용 채널 후보 (BETA-X 2에서 사용)
+pub const IPC_HOT_THRESHOLD: u64 = 100;
+
+/// BETA-X 6: 창당 이 이하 메시지면 "cold" (채널 회수 후보)
+const DECAY_THRESHOLD: u64 = 5;
+
+/// BETA-X 6: DECAY_THRESHOLD 이하인 창이 이 횟수 연속되면 채널 회수
+const DECAY_COLD_WINDOWS: u8 = 2;
+
+const MAX_IPC_PAIRS: usize = 16;
+
 // ── Policy Engine ────────────────────────────────────────────────────────────
 
 pub struct PolicyEngine {
@@ -65,6 +96,8 @@ pub struct PolicyEngine {
     total_ticks: u64,
     last_report_tick: u64,
     report_interval: u64,
+    /// BETA-X 1: 프로세스 쌍별 IPC 빈도 테이블
+    ipc_table: [IpcEntry; MAX_IPC_PAIRS],
 }
 
 impl PolicyEngine {
@@ -74,6 +107,7 @@ impl PolicyEngine {
             total_ticks: 0,
             last_report_tick: 0,
             report_interval: 36,
+            ipc_table: [IpcEntry::empty(); MAX_IPC_PAIRS],
         }
     }
 
@@ -119,6 +153,57 @@ impl PolicyEngine {
             self.last_report_tick = tick;
             self.adapt_and_report(tick);
         }
+    }
+
+    /// BETA-X 1: IPC 이벤트 수신 — from→to 누적 카운트 갱신.
+    pub fn observe_ipc(&mut self, from: Pid, to: Pid, count: u64) {
+        // 기존 항목 업데이트
+        for i in 0..MAX_IPC_PAIRS {
+            if self.ipc_table[i].active
+                && self.ipc_table[i].from == from
+                && self.ipc_table[i].to == to
+            {
+                self.ipc_table[i].count = count;
+                return;
+            }
+        }
+        // 빈 슬롯에 신규 등록
+        for i in 0..MAX_IPC_PAIRS {
+            if !self.ipc_table[i].active {
+                self.ipc_table[i] = IpcEntry { from, to, count, active: true, last_count: 0, cold_windows: 0 };
+                return;
+            }
+        }
+        // 슬롯 가득 참 — 최소 카운트 슬롯 교체
+        let mut min_i = 0;
+        for i in 1..MAX_IPC_PAIRS {
+            if self.ipc_table[i].count < self.ipc_table[min_i].count {
+                min_i = i;
+            }
+        }
+        self.ipc_table[min_i] = IpcEntry { from, to, count, active: true, last_count: 0, cold_windows: 0 };
+    }
+
+    /// BETA-X 2용: 임계값 이상의 핫 IPC 쌍을 `out`에 채우고 개수 반환.
+    pub fn hot_ipc_pairs(&self, threshold: u64, out: &mut [(Pid, Pid)], max: usize) -> usize {
+        // 후보 수집
+        let mut buf = [(0u64, 0u64, 0u64); MAX_IPC_PAIRS];
+        let mut cnt = 0usize;
+        for i in 0..MAX_IPC_PAIRS {
+            if self.ipc_table[i].active && self.ipc_table[i].count >= threshold {
+                buf[cnt] = (self.ipc_table[i].from, self.ipc_table[i].to, self.ipc_table[i].count);
+                cnt += 1;
+            }
+        }
+        // count 내림차순 선택 정렬
+        for i in 0..cnt {
+            let mut best = i;
+            for j in (i + 1)..cnt { if buf[j].2 > buf[best].2 { best = j; } }
+            buf.swap(i, best);
+        }
+        let n = cnt.min(max).min(out.len());
+        for i in 0..n { out[i] = (buf[i].0, buf[i].1); }
+        n
     }
 
     /// CPU 사용률 리포트 + 우선순위 조정 + 윈도우 리셋 (ALPHA 5).
@@ -193,6 +278,106 @@ impl PolicyEngine {
             "[policy]    slice={}틱 고정  (최고 점유 {}%)",
             new_slice, max_pct,
         );
+
+        // BETA-X 1: IPC 핫 쌍 top-3 리포트
+        let mut ranked = [(0usize, 0u64); MAX_IPC_PAIRS];
+        let mut valid = 0usize;
+        for i in 0..MAX_IPC_PAIRS {
+            if self.ipc_table[i].active && self.ipc_table[i].count > 0 {
+                ranked[valid] = (i, self.ipc_table[i].count);
+                valid += 1;
+            }
+        }
+        // 선택 정렬 (count 내림차순)
+        for i in 0..valid.min(3) {
+            let mut best = i;
+            for j in (i + 1)..valid { if ranked[j].1 > ranked[best].1 { best = j; } }
+            ranked.swap(i, best);
+        }
+        if valid > 0 {
+            crate::serial_println!("[policy-X] IPC 핫 쌍 top{}:", valid.min(3));
+            for i in 0..valid.min(3) {
+                let idx = ranked[i].0;
+                let count = self.ipc_table[idx].count;
+                let from  = self.ipc_table[idx].from;
+                let to    = self.ipc_table[idx].to;
+                let hot   = if count >= IPC_HOT_THRESHOLD { " [HOT]" } else { "" };
+                crate::serial_println!(
+                    "[policy-X]   #{} pid{}→pid{}: {}회{}",
+                    i + 1, from, to, count, hot,
+                );
+
+                // BETA-X 2: 임계값 초과 쌍에 fast channel 자동 생성
+                if count >= IPC_HOT_THRESHOLD {
+                    let n_before = crate::process::ipc_fast::channel_count();
+                    let _cap = crate::process::ipc_fast::ensure_channel(from, to);
+                    let n_after = crate::process::ipc_fast::channel_count();
+                    if n_after > n_before {
+                        crate::serial_println!(
+                            "[policy-X]   └→ fast channel 활성화 cap={} (총 {}개)",
+                            _cap, n_after,
+                        );
+                    }
+
+                    // BETA-X 5: hot pair를 같은 코어에 자동 고정
+                    crate::smp::pin_pair(from, to);
+                    // PCB preferred_cpu도 갱신
+                    let target_cpu = crate::smp::get_affinity(from).unwrap_or(0);
+                    crate::process::scheduler::set_preferred_cpu(from, target_cpu);
+                    crate::process::scheduler::set_preferred_cpu(to, target_cpu);
+                }
+            }
+        }
+
+        // BETA-X 6: cold 창 감지 → 채널 회수(decay)
+        for i in 0..MAX_IPC_PAIRS {
+            if !self.ipc_table[i].active { continue; }
+
+            let delta = self.ipc_table[i].count.saturating_sub(self.ipc_table[i].last_count);
+            self.ipc_table[i].last_count = self.ipc_table[i].count;
+
+            let from = self.ipc_table[i].from;
+            let to   = self.ipc_table[i].to;
+
+            if delta < DECAY_THRESHOLD {
+                self.ipc_table[i].cold_windows =
+                    self.ipc_table[i].cold_windows.saturating_add(1);
+                let cw = self.ipc_table[i].cold_windows;
+
+                if cw >= DECAY_COLD_WINDOWS {
+                    // 채널 회수
+                    crate::process::ipc_fast::drop_channel(from, to);
+                    crate::smp::unpin(from);
+                    crate::smp::unpin(to);
+                    crate::process::scheduler::set_preferred_cpu(from, u8::MAX);
+                    crate::process::scheduler::set_preferred_cpu(to, u8::MAX);
+                    self.ipc_table[i].active = false;
+                    self.ipc_table[i].cold_windows = 0;
+                    crate::serial_println!(
+                        "[policy-X] decay: pid{}↔pid{} 채널 회수 완료 (cold={}회)",
+                        from, to, DECAY_COLD_WINDOWS,
+                    );
+                } else {
+                    crate::serial_println!(
+                        "[policy-X] decay: pid{}→pid{} 통신 감소 delta={} (cold={}/{})",
+                        from, to, delta, cw, DECAY_COLD_WINDOWS,
+                    );
+                }
+            } else {
+                // 활성 — cold 카운터 초기화
+                self.ipc_table[i].cold_windows = 0;
+            }
+        }
+
+        // BETA-X 5: core affinity 요약
+        let aff = crate::smp::affinity_count();
+        if aff > 0 {
+            crate::serial_println!(
+                "[policy-X] core affinity: {}개 PID 고정됨 (코어 수={})",
+                aff, crate::smp::cpu_count(),
+            );
+        }
+
         crate::serial_println!("[policy] ─────────────────────────────────────");
     }
 }
@@ -222,4 +407,14 @@ pub fn register_pid(pid: Pid) {
 
 pub fn on_switch(from: Pid, to: Pid, tick: u64) {
     unsafe { (*core::ptr::addr_of_mut!(ENGINE)).on_switch(from, to, tick); }
+}
+
+/// BETA-X 1: IPC 이벤트 — Policy Engine에 (from→to, count) 알림.
+pub fn observe_ipc(from: Pid, to: Pid, count: u64) {
+    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).observe_ipc(from, to, count); }
+}
+
+/// BETA-X 2용: 임계값 이상의 IPC 핫 쌍 목록 반환.
+pub fn hot_ipc_pairs(threshold: u64, out: &mut [(Pid, Pid)], max: usize) -> usize {
+    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).hot_ipc_pairs(threshold, out, max) }
 }

@@ -198,6 +198,8 @@ fn process_packet() {
     // 왼쪽 버튼 rising edge → 클릭
     if btn & 0x01 != 0 && prev & 0x01 == 0 {
         on_click(x, y);
+        // BETA-X 4: 클릭 이벤트 직통 경로 push
+        crate::input_direct::push_mouse_click(x, y, btn);
     }
     // 왼쪽 버튼 홀드 + 이동 → 드래그
     if btn & 0x01 != 0 && (dx != 0 || dy != 0) {
@@ -206,6 +208,11 @@ fn process_packet() {
     // 왼쪽 버튼 falling edge → 드래그 종료
     if prev & 0x01 != 0 && btn & 0x01 == 0 {
         crate::wm::on_release();
+    }
+
+    // BETA-X 4: 마우스 이동 이벤트 직통 경로 push (IRQ12 컨텍스트, AtomicU64 링 버퍼)
+    if dx != 0 || dy != 0 {
+        crate::input_direct::push_mouse_move(x, y);
     }
 
     PREV_BTN.store(btn, Ordering::Relaxed);

@@ -13,8 +13,12 @@
 //! AP들은 현재 스케줄러에 통합되지 않음 — idle 상태로 대기.
 //! 향후 SMP 스케줄러와 연결 예정.
 
+use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Mutex;
 use limine::mp::{MpGotoFunction, MpInfo, MpRespData};
+
+use crate::process::Pid;
 
 // ── 상수 ─────────────────────────────────────────────────────────────────────
 
@@ -141,4 +145,85 @@ pub fn cpu_count() -> usize {
 /// 온라인 AP 수
 pub fn ap_count() -> usize {
     AP_ONLINE.load(Ordering::SeqCst)
+}
+
+// ── BETA-X 5: Core Affinity ───────────────────────────────────────────────────
+
+/// PID → 선호 CPU 코어 매핑 (BETA-X 5)
+static AFFINITY: Mutex<BTreeMap<Pid, u8>> = Mutex::new(BTreeMap::new());
+
+/// 현재 실행 중인 CPU 코어 ID (CPUID leaf1 Initial APIC ID).
+///
+/// BSP = 보통 0, AP = LAPIC ID (1, 2, ...).
+/// APs가 HLT 루프 중인 현재는 항상 BSP(0)를 반환.
+///
+/// rbx는 LLVM 예약 레지스터이므로 push/pop으로 보호 후 CPUID 실행.
+pub fn current_cpu_id() -> u8 {
+    let ebx_val: u64;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {out}, rbx",
+            "pop rbx",
+            out = out(reg) ebx_val,
+            inout("eax") 1u32 => _,
+            out("ecx") _,
+            out("edx") _,
+        );
+    }
+    ((ebx_val >> 24) & 0xFF) as u8
+}
+
+/// 특정 PID를 지정 코어에 고정.
+pub fn pin_to_cpu(pid: Pid, cpu: u8) {
+    AFFINITY.lock().insert(pid, cpu);
+}
+
+/// PID의 선호 코어 조회. None = 미설정 (어느 코어든 실행 가능).
+pub fn get_affinity(pid: Pid) -> Option<u8> {
+    AFFINITY.lock().get(&pid).copied()
+}
+
+/// Hot IPC 쌍을 같은 코어에 자동 고정 (BETA-X 5 핵심 로직).
+///
+/// 이미 고정된 쪽이 있으면 그 코어로 합류.
+/// 둘 다 미설정이면 부하 최소 코어(현재는 단순 0)에 배정.
+pub fn pin_pair(from: Pid, to: Pid) {
+    let from_cpu = get_affinity(from);
+    let to_cpu   = get_affinity(to);
+
+    let target = match (from_cpu, to_cpu) {
+        (Some(c), _) => c,
+        (_, Some(c)) => c,
+        _            => least_loaded_cpu(),
+    };
+
+    // 이미 같은 코어면 중복 로그 방지
+    if from_cpu == Some(target) && to_cpu == Some(target) { return; }
+
+    pin_to_cpu(from, target);
+    pin_to_cpu(to, target);
+
+    crate::serial_println!(
+        "[affinity] hot pair pid{}↔pid{} → core{} (캐시 재사용 최적화)",
+        from, to, target,
+    );
+}
+
+/// 부하 최소 코어 선택 — 현재는 0(BSP) 반환.
+/// SMP 스케줄러 완성 시: 각 코어의 실행 큐 길이를 비교해 최소 선택.
+fn least_loaded_cpu() -> u8 {
+    // TODO(BETA-X 5+): 코어별 Ready 프로세스 수 비교
+    0
+}
+
+/// BETA-X 6: PID의 core affinity 핀 제거 (채널 회수 시 호출).
+pub fn unpin(pid: Pid) {
+    AFFINITY.lock().remove(&pid);
+}
+
+/// 현재 등록된 affinity 항목 수 (디버그용)
+pub fn affinity_count() -> usize {
+    AFFINITY.lock().len()
 }

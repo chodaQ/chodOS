@@ -3,12 +3,11 @@
 > "아치 리눅스의 자유도 + macOS의 편안함"
 > Rust no_std, x86_64, Limine UEFI
 >
-> **현재 단계: ALPHA 완료 (1~17) → BETA 진행 중 (BETA 1~15 ✅)**
+> **현재 단계: ALPHA 완료 (1~17) → BETA 1~15 완료 → BETA-X(동적 IPC 최적화) 완료**
 > 부팅 → 메모리 → 스케줄러 → IPC → ext4 → TCP/IP → Linux syscall →
-> ELF 실행 → Shell → GUI까지 end-to-end 동작 확인됨.
->
-> **최종 목표: Arch Linux pacman 실행** (`pacman -S neovim` → 설치 → 실행)
-> BETA 9~28 (Phase A~F): 프로세스 모델 → FS → 메모리 → 동적 링커 → 네트워크 → pacman
+> ELF 실행 → Shell → GUI → 동적 IPC fast path(관찰→생성→회수 전체 생애주기)까지
+> end-to-end 동작 확인됨. BETA-X 7 측정 결과는 QEMU 단일코어/소형 페이로드
+> 조건에서는 fast channel이 오히려 느렸음(0.9x) — §4 BETA-X 섹션 "측정 결과" 참고.
 
 ---
 
@@ -354,87 +353,25 @@ Tier 3 (장기)    : io_uring, BPF, namespaces, cgroups, seccomp
 
 | Milestone | 내용 | 비고 |
 |-----------|------|------|
-| BETA 1 | 키보드 스캔코드 → ASCII 변환 + Shell 에코 | ✅ kbd.rs Set1 변환 테이블 완성. mushell read_line에 문자 에코 + 백스페이스(\b·space·\b) 추가 |
-| BETA 2 | GUI 마우스/클릭 이벤트 처리 | ✅ 창 드래그(타이틀바), 닫기(X 버튼), 태스크바 토글, MuStart 전체 복원. wm.rs AtomicI32 동적 위치 + on_drag/on_release 이벤트. mouse.rs rising/falling edge + 홀드+이동 분기 추가 |
-| BETA 3 | Linux Compat 확장 | ✅ pipe/pipe2(4KB 링버퍼), select/pselect6(stdin 블로킹 대기), epoll_create/ctl/wait(16개 fd 감시), socket/connect/bind/listen/accept/send/recv(ECONNREFUSED 스텁), rt_sigaction(핸들러 테이블), rt_sigprocmask(SIG_BLOCK/UNBLOCK/SETMASK), kill(pending 비트), poll 개선(stdin+pipe+sock 분기), Ctrl+C → SIGINT pending |
-| BETA 4 | Capability Handle Table ↔ 실제 syscall 연결 | ✅ syscall/fd.rs: FileResource(path+data+AtomicUsize pos)+DirResource를 HandleTable에 등록. sys_open→fd::open_file/open_dir(진짜 fd 발급), sys_read(fd≥3)→fd::read(파일 위치 추적), sys_lseek→fd::seek, pread64→fd::pread(위치 불변), sys_close→fd::close(Arc 해제), getdents64→DirResource.path, fstat→HandleTable조회. 프로세스 시작마다 fd::init()으로 테이블 초기화. |
-| BETA 5 | ✅ 멀티코어 (SMP) 지원 | 지금은 싱글코어 전제. 실제 데스크탑 CPU 대응 |
-| BETA 6 | 메모리 안전성 정리 | ✅ `addr_of!/addr_of_mut!`로 mutable static reference 제거, 함수 포인터 캐스트(`as *const () as u64`) 수정, dead_code 정리. 빌드 경고 87→0 |
-| BETA 7 | ✅ 추가 ELF 유틸리티 포팅 | `muls`(ls via getdents64), `mupwd`(pwd via getcwd) 추가. mushell에 ls/pwd/mkdir/cat 명령 내장. 패키지 syscall 번호 오류(200→400 등) 수정. |
-| BETA 8 | ✅ 패키지 관리자 고도화 | `Package`에 `deps` 필드 추가. `AtomicU64` 설치 비트맵. 새 syscall 4개(403~406): pkg_info/install/remove/installed. mushell `mukg info/search/upgrade/installed` 추가. |
+| BETA 1 | 키보드 스캔코드 → ASCII 변환 + Shell 에코 | ✅ kbd.rs Set1 변환 테이블 완성. mushell read_line에 문자 에코 + 백스페이스 추가 |
+| BETA 2 | GUI 마우스/클릭 이벤트 처리 | ✅ 창 드래그/닫기/태스크바 토글. wm.rs 동적 위치 + on_drag/on_release. mouse.rs rising/falling edge |
+| BETA 3 | Linux Compat 확장 | ✅ pipe/select/epoll/socket/signal 등 구현 |
+| BETA 4 | Capability Handle Table ↔ 실제 syscall 연결 | ✅ syscall/fd.rs로 open/read/write/close가 HandleTable에 실제로 등록됨 |
+| BETA 5 | 멀티코어 (SMP) 지원 | ✅ |
+| BETA 6 | 메모리 안전성 정리 | ✅ 빌드 경고 87→0 |
+| BETA 7 | 추가 ELF 유틸리티 포팅 | ✅ muls, mupwd 등. mushell에 ls/pwd/mkdir/cat 내장 |
+| BETA 8 | 패키지 관리자 고도화 | ✅ deps 필드, pkg_info/install/remove/installed syscall |
+| BETA 9 | fork / exec / wait 완성 | ✅ UserProcTable, fork_current, wait4_impl, exec_replace |
+| BETA 10 | 시그널 서브시스템 | ✅ signal.rs, rt_sigaction/sigprocmask/sigreturn, SIGSEGV/SIGCHLD |
+| BETA 11 | 스레딩 (clone CLONE_THREAD) | ✅ CLONE_VM, futex_wait/wake, TLS(MSR_FS_BASE), MAX_PROCS 16 |
+| BETA 12 | 쓰기 가능 tmpfs | ✅ inode 트리, rename/link/unlink/chmod, /proc, /tmp /run /var 마운트 |
+| BETA 13 | ext4 copy-up overlay | ✅ copy_up, open_writable/readonly 통합 API |
+| BETA 14 | /dev + TTY 서브시스템 | ✅ DevKind(Null/Zero/Tty 등), ioctl 완전 구현 |
+| BETA 15 | 파일 백드 mmap + munmap | ✅ mmap_map/mmap_anon/munmap_pages, MAP_FIXED, TLB invlpg |
 
----
-
-#### Phase A — 프로세스 모델 완성 (Linux 바이너리가 "살아 있으려면")
-
-| Milestone | 내용 | 비고 |
-|-----------|------|------|
-| BETA 9  | ✅ **fork / exec / wait 완성** | `UserProcTable` (최대 8 프로세스, 64KB per-process 커널 스택). `fork_current`: 유저 주소 공간 deep-copy + isr128 복귀 프레임 구성. `wait4_impl`: 부모 block → child IRETQ. `try_wake_parent`: 자식 exit 시 부모 frame rax 기록 → IRETQ 복귀. `exec_replace`: forked child exec → 주소 공간 교체. `up_iretq_from_frame` asm 심볼. `clone_user_space` / `load_elf_into_space` 분리. TSS.RSP0 per-process 갱신. |
-| BETA 10 | ✅ **시그널 서브시스템** | `signal.rs` 신규. `MuSigFrame`(120B): 트램폴린(mov rax,15;int 0x80) + 저장 컨텍스트. `deliver_pending_signals` → isr128 프레임 RIP/RSP/rdi 수정. `sys_rt_sigaction` / `sys_rt_sigprocmask` / `sys_rt_sigreturn` 실구현. `SIGSEGV`/`SIGBUS`: #PF vec14 유저모드 폴트 → 즉시 종료. `SIGCHLD`: try_wake_parent에서 부모 Running 시 pending 비트 세팅. SA_NODEFER / SA_RESETHAND 지원. |
-| BETA 11 | ✅ **스레딩 (clone CLONE\_THREAD)** | `clone_thread` (SYS_CLONE=56): CLONE_VM 공유 CR3, 새 kstack, child frame 복사(rax=0/RSP=child_stack). CLONE_SETTLS → `fs_base` 저장. CLONE_CHILD_SETTID/CLEARTID → tid 기록 및 exit 시 클리어. `iretq_to_frame` → WRMSR MSR_FS_BASE(0xC0000100) per-thread TLS 복원. `futex_wait_impl`: *uaddr==val → Blocked(uaddr) + pick_next_runnable (IRETQ). `futex_wake_impl`: Blocked→Ready. `sched_yield_impl`: Ready + IRETQ to next (cooperative). thread exit: tid_ptr 클리어 → futex_wake → 자동 reap → pick_next. `sys_arch_prctl(ARCH_SET_FS)` → MSR + UserProc.fs_base 동시 저장. `current_tgid()` / `current_pid()` 분리(getpid=tgid, gettid=own). MAX_PROCS 16으로 확장. |
-
----
-
-#### Phase B — 파일시스템 스택 (pacman이 `/var`, `/tmp`, `/etc`에 써야 함)
-
-| Milestone | 내용 | 비고 |
-|-----------|------|------|
-| BETA 12 | ✅ **쓰기 가능 tmpfs** | 인메모리 파일시스템 (inode 트리 + 블록 벡터), `rename`/`link`/`unlink`/`chmod`/`chown`/`truncate` 완전 구현. `/proc` 가상 FS. `/tmp`, `/run`, `/var` 마운트. `*at` 변형 syscall 전체. |
-| BETA 13 | ✅ **ext4 copy-up overlay** | `copy_up(path)`: ext4 읽기 전용 파일을 tmpfs로 복사 후 쓰기 가능하게. `open_writable` / `open_readonly` / `is_dir` / `exists_any` / `stat_any` 통합 API. `sys_open` + `sys_openat` 단일 경로로 통합. `pwrite64` fd≥3 지원. 디스크 write 없이 세션 내 ext4 파일 수정 가능. |
-| BETA 14 | ✅ **/dev + TTY 서브시스템** | `syscall/dev.rs` 신규. DevKind: Null/Zero/Full/Random/Tty/Pts/Stdin/Stdout/Stderr. `DevResource` → HandleTable 등록. `ioctl` 완전 구현: TCGETS(termios 더미)/TIOCGWINSZ(80×24)/TIOCGPGRP/FIONREAD + fd 0/1/2도 tty로 취급 (`isatty()` 성공). `/dev/urandom` → xorshift64 PRNG. `stat_any`/`exists_any`/`is_dir`/`getdents64`에 `/dev` 통합. |
-| BETA 15 | ✅ **파일 백드 mmap + munmap** | `paging::mmap_map/mmap_anon/munmap_pages/virt_to_phys` 신규. `UserProc.mmap_next` (0x40000000 bump allocator). `MMAP_TABLE: BTreeMap<vaddr, pages>` 추적. `MAP_ANONYMOUS` + `MAP_FIXED` 지원 (기존 영역 내 재매핑). 파일 백드: `fd::pread`로 offset 읽기 → `mmap_map`. `munmap`: TLB `invlpg` + `free_frame` 실제 해제. 동적 링커(ld-musl)의 두 단계 mmap 패턴 지원. |
-
----
-
-#### Phase C — 메모리 서브시스템 (동적 링커의 기반)
-
-| Milestone | 내용 | 비고 |
-|-----------|------|------|
-| BETA 16 | **mprotect 완전 구현** | PROT\_READ/WRITE/EXEC 페이지 단위 권한 변경, NX 비트 (Execute Disable) 적용. 동적 링커 PLT write-then-protect 패턴 필수. |
-| BETA 17 | **Demand paging & 페이지 폴트** | `#PF` 핸들러에서 lazy alloc, CoW PTE 복사, stack 자동 확장(guard page 감지). |
-
----
-
-#### Phase D — 동적 링커 (`.so` 없이는 어떤 앱도 안 돌아감)
-
-| Milestone | 내용 | 비고 |
-|-----------|------|------|
-| BETA 19 | **ELF .so 파서 & 재배치** | `PT_LOAD` 세그먼트 mmap, `SHT_RELA`/`R_X86_64_JUMP_SLOT`/`R_X86_64_GLOB_DAT` 재배치, `.plt`/`.got.plt` 패치, `DT_NEEDED` 의존성 체인 파싱 |
-| BETA 20 | **동적 링커 (`ld-musl` 호환)** | `PT_INTERP=/lib/ld-musl-x86_64.so.1` 인터프리터 실행, 심볼 해석 (`dlopen`/`dlsym`/`dlclose`), `RTLD_LAZY`/`RTLD_NOW`, 초기화 순서 (`DT_INIT_ARRAY`) |
-| BETA 21 | **musl-libc 내장** | musl 1.2.x를 커널 initrd에 포함 (`/lib/ld-musl-x86_64.so.1`, `/lib/libc.so`). musl-linked 동적 바이너리 실행 성공이 이 단계의 완료 기준 |
-
----
-
-#### Phase E — 네트워크 스택 (pacman이 미러에서 패키지를 받아야 함)
-
-| Milestone | 내용 | 비고 |
-|-----------|------|------|
-| BETA 22 | **TCP/IP 실제 구현** | virtio-net 드라이버 완성 (현재 스텁), `smoltcp` 크레이트 통합, IP/TCP/UDP 소켓이 실제로 인터넷에 연결. `socket`/`connect`/`send`/`recv` 스텁 → 실동작 |
-| BETA 23 | **DNS 리졸버** | `/etc/resolv.conf` 파싱, UDP DNS 쿼리 (포트 53), `getaddrinfo`/`getnameinfo` 구현. pacman mirrorlist의 도메인 이름 해석 필수 |
-| BETA 24 | **TLS / HTTPS** | `rustls` 통합, X.509 인증서 검증 (`/etc/ssl/certs`), HTTPS 커넥션. Arch Linux 미러는 전부 HTTPS — 이 없이는 다운로드 불가 |
-
----
-
-#### Phase F — 패키지 매니저 (목표 지점)
-
-| Milestone | 내용 | 비고 |
-|-----------|------|------|
-| BETA 25 | **아카이브 & 압축** | `zstd` 디컴프레서 (`zstd` 크레이트), `.tar` 스트림 파서, `.pkg.tar.zst` 추출. `bzip2`/`gzip`/`xz` 폴백. pacman이 패키지 설치 시 이 형식 사용 |
-| BETA 26 | **pacman-static 실행** | musl-static 빌드 pacman 커널에 내장 또는 ext4 이미지에 포함. `/etc/pacman.conf`, `/etc/pacman.d/mirrorlist`, `/var/lib/pacman/` DB 초기화. `pacman -Sy` 성공이 완료 기준 |
-| BETA 27 | **glibc 호환성 레이어** | glibc symbol versioning (`GLIBC_2.17` 등), `IFUNC` 리졸버, `/lib/x86_64-linux-gnu/libc.so.6`. glibc-linked 동적 바이너리 실행. `ldd`, `ldconfig` 대응 |
-| BETA 28 | **완전한 Arch Linux 환경** | glibc 동적 링크 pacman 실행, `pacman -S <pkg>` 로 임의 Arch 패키지 설치·제거·업그레이드. bash, coreutils, python 등 실제 앱 구동 확인 |
-
----
-
-> **각 Phase의 완료 기준**
-> - Phase A 완료 → musl-static 단순 바이너리 (hello, coreutils-static) 정상 실행
-> - Phase B 완료 → `/tmp`, `/var`, `/proc` 읽기/쓰기, TTY 제어 정상
-> - Phase C 완료 → 대형 ELF (수 MB) mmap 로딩, CoW fork 메모리 절약
-> - Phase D 완료 → musl-linked 동적 바이너리 (`ls`, `bash` musl 빌드) 실행
-> - Phase E 완료 → `curl https://archlinux.org` 성공
-> - Phase F 완료 → `pacman -S neovim` → neovim 설치 후 실행 ✓
-
----
+> **BETA 16 이후(mprotect, 동적 링커, glibc, pacman 등)는 "나중에" 칸으로 미룬다.**
+> 삭제가 아니라 순서 변경 — §4 맨 아래 "BETA 16~28 (보류)" 참고.
+> 그 자리보다 먼저 **BETA-X(동적 IPC 최적화)** 를 진행한다. 이유는 아래 BETA-X 섹션 참고.
 
 ### ML — BETA 완료 후 시작
 
@@ -443,6 +380,166 @@ Tier 3 (장기)    : io_uring, BPF, namespaces, cgroups, seccomp
 | ML 1 | 통계 기반 (EMA → Bayesian) | 여기서부터 ML 단계 시작 |
 | ML 2 | LightGBM 기반 분류 | 대부분의 경우 이 단계로 충분할 가능성이 큼 |
 | ML 3 (필요시) | 강화학습(RL) | 상태공간 정의·수렴 문제가 어려워 최후순위 |
+
+---
+
+### BETA-X — 동적 IPC 최적화 (BETA 16 이전에, 우선 진행)
+
+> **이 트랙이 BETA 16(mprotect)~28(pacman)보다 먼저 진행된다.**
+> BETA 16~28은 보류된 것이고 삭제된 게 아니다 — 순서만 바뀜.
+>
+> 계기: ARCHITECTURE.md가 점점 "Policy Engine 달린 Linux 클론"으로 흘러가고 있다는
+> 위기 인식에서 시작. BETA 9~28 전체 중 Policy Engine 관련 마일스톤이 0개였음.
+> Linux 호환은 원래 README에서 "Shim(도구)"으로 정의됐지, 본체가 아니었다.
+
+#### 배경 — 왜 이 방향인가
+
+```
+질문: "Policy Engine, 그냥 유저 공간 앱으로 만들면 안 되나?"
+답:   컨텍스트 스위치 시점/페이지 폴트 시점처럼
+      "커널만 볼 수 있는 시점"에 개입해야 의미가 있다.
+      지금 Policy Engine(EMA+aging+키보드 부스트)은 이미 그 기준을 통과함.
+
+질문: "마이크로커널 성능 저하의 최대 원인은?"
+답:   흔히 'IPC 자체 비용'이라 생각하지만, Liedtke의 분석에 따르면
+      진짜 원인은 캐시 미스(capacity cache-miss)다.
+      프로세스 전환마다 캐시가 비워지는데, 마이크로커널은
+      같은 작업에도 전환 횟수가 모놀리식보다 훨씬 많다
+      (예: 파일 읽기 1회에 모놀리식 전환 2회 vs 마이크로커널 전환 4회).
+      → "전환 횟수를 줄이는 것"과 "캐시 미스를 줄이는 것"은 거의 같은 문제.
+
+질문: "자주 통신하는 프로세스 쌍한테 전용 채널 만들어주는 사례, 이미 있나?"
+답:   있다 — 단, 전부 '정적'이다.
+      - seL4 fastpath: 미리 정해진 Call/ReplyWait 패턴만 최적화
+      - dIPC: 미리 지정된 프로세스들을 공유 주소공간에 매핑 (L4보다 8.87배 빠름)
+      - SkyBridge: 미리 지정된 쌍에게 공유 버퍼 제공
+      - QNX: 메시지 "크기" 기준으로 레지스터/공유메모리 분기 (빈도 기준 아님)
+      → "런타임에 통신 빈도를 관찰해서 자동으로 fast path를 만드는" 사례는
+        검색 범위 내에서 발견되지 않음. 여기가 비어있는 자리.
+```
+
+#### 핵심 아이디어
+
+> **Policy Engine이 프로세스의 CPU 행동 패턴을 관찰하던 것과 같은 방식으로,
+> 프로세스 쌍의 IPC 통신 빈도 패턴도 관찰한다. 자주 통신하는 쌍을 감지하면
+> 전용 공유 메모리 채널(fast path)을 런타임에 자동 생성한다.**
+
+```
+지금 (모든 IPC가 동일 경로):
+Process A → 일반 메시지 큐 → Microkernel → 일반 메시지 큐 → Process B
+
+목표 (감지된 고빈도 쌍만 전용 경로):
+Process A ←→ [전용 SharedBuffer, Ring0 안 거침] ←→ Process B
+나머지 쌍은 그대로 일반 IPC 큐 사용
+```
+
+가장 직접적인 적용 대상은 **유저 공간 서버끼리의 통신**이다(Ring 0 내부 함수 호출은
+이미 충분히 빠르므로 대상이 아님):
+
+```
+WM ↔ 그래픽 드라이버    → 초당 60회(프레임마다) 통신. 전통적으로
+                          마이크로커널이 GUI에서 약했던 지점이 바로 여기.
+마우스 드라이버 ↔ WM    → 클릭/이동마다 통신
+Policy Engine ↔ VFS/Net/드라이버 → 행동 신호 수집 경로
+```
+
+#### 단계 (모두 완료 ✅)
+
+| Milestone | 내용 | 결과 |
+|-----------|------|------|
+| BETA-X 1 | IPC 통신 빈도 계측 | ✅ PCB `ipc_peer_pids[8]`/`ipc_peer_counts[8]` → `observe_ipc()` → Policy Engine `ipc_table`. 로그: `[policy-X] IPC 핫 쌍 top2: pid3→pid4: 120회 [HOT]` |
+| BETA-X 2 | 임계값(count≥100) 기반 자동 채널 생성 | ✅ `ensure_channel()` idempotent 설계. `send()`/`recv()`가 기존 코드 수정 없이 투명하게 fast path 전환 (`fast_cap` sentinel) |
+| BETA-X 3 | WM ↔ 그래픽 드라이버 적용 | ✅ 120회 일반 IPC → 36틱 후 자동으로 fast channel 전환. 실제 `fb::fill_rect` 렌더링까지 확인. 로그: `[gfx] ★ fast channel 첫 수신!` |
+| BETA-X 4 | 입력 경로 직통화 | ✅ IRQ-safe 링버퍼(`AtomicU64[64]`, Mutex 없음) → `push_key()`를 IRQ1 핸들러에서 직접 호출 → count=101에서 자동 fast 전환 |
+| BETA-X 5 | Core affinity | ✅ 구조 완성 (`pin_pair`, `set_preferred_cpu`, 스케줄러 tie-breaking). QEMU 1코어라 효과는 미관측 — 실 하드웨어 멀티코어 필요 |
+| BETA-X 6 | 채널 회수(decay) | ✅ cold_windows 2회(≈4초) 무통신 시 자동 회수 확인. 채널+affinity+PCB 모두 정리됨 |
+| BETA-X 7 | A/B 벤치마크 (rdtsc) | ✅ 측정 인프라 완성. **결과: avg 0.9x (오히려 700 cycles 느림)** — 아래 "측정 결과" 참고 |
+
+#### 측정 결과 — 솔직한 평가
+
+```
+[bench] Phase A (일반 IPC):     avg 12400 cycles
+[bench] Phase B (fast channel): avg 13100 cycles
+[bench] avg 변화: ↑700 cycles  비율=0.9x
+```
+
+**64바이트 데이터에서는 fast channel이 더 느렸다.** 원인이 명확히 분석됨:
+
+```
+일반 IPC:     힙 접근 1회 (VecDeque push, 64B는 스택 복사로 충분)
+fast channel: 힙 접근 2회 (SharedBuffer write + read)
+→ 공유 메모리 자체가 작은 데이터에는 오버헤드
+```
+
+fast channel의 실질 이득이 나타날 조건 (이번 측정에서는 충족되지 않음):
+```
+① 페이로드가 64B 초과 (일반 IPC는 truncation, fast path는 전체 전달)
+② 동일 코어 캐시 hot 상태 (BETA-X 5 affinity 효과 — QEMU 1코어라 미충족)
+③ 고빈도 연속 송신 (재할당 제거 누적 효과)
+```
+
+**그럼에도 BETA-X 트랙이 증명한 것:**
+> 런타임 관찰 → 자동 채널 생성 → 자동 회수의 전체 생애주기(lifecycle)가
+> no_std 베어메탈 환경에서 한 번도 끊기지 않고 동작했다.
+> 성능 수치는 기대에 못 미쳤지만, "학계에 선례가 없던 동적 패턴 감지
+> 시스템"을 실제로 구현해서 끝까지 돌려본 것 자체가 BETA-X의 핵심 성과.
+
+다음에 효과를 제대로 보려면: ① `-smp 4`로 실제 멀티코어 QEMU 환경에서 재측정,
+② 64B 초과 페이로드(예: 프레임버퍼 일부, 1KB+ 텍스처)로 재측정.
+
+#### 알려진 한계 (정직하게 기록)
+
+```
+- 캐시 미스는 "줄어들" 수는 있어도 "없어지지"는 않는다 (하드웨어 구조적 한계)
+- QEMU 에뮬레이션에서는 실제 하드웨어 캐시 동작이 정확히 안 보일 수 있음
+  → 측정(BETA-X 7)의 신뢰도에 한계가 있을 수 있다는 점을 인지할 것
+- 동적으로 채널이 생성/소멸되면 디버깅이 어려워짐 (한 리뷰에서 지적된
+  "Observability" 문제와 직결) → 채널 생성/소멸 이벤트를 로깅하는
+  경량 트레이싱이 BETA-X 2와 함께 가야 함
+- 학계에 선례가 없다는 것은 "비어있는 자리"이자 동시에 "아무도 안 한 이유가
+  있을 수 있다"는 뜻이기도 함 — 보안(공유 메모리 접근 범위)과 메모리 관리
+  복잡도가 실제로 만만치 않을 가능성을 열어둘 것
+```
+
+---
+
+### BETA-X 완료 후 — 다음 방향 (열린 질문)
+
+BETA-X가 "동적 패턴 감지 → 자동 최적화" 기계 자체는 증명했지만, 효과는
+아직 미증명 상태(QEMU 1코어, 64B 페이로드 조건). 다음 두 갈래 중 선택 필요:
+
+```
+A) BETA-X 검증 강화
+   -smp 4 멀티코어 + 64B 초과 페이로드로 재측정
+   → "진짜 효과 있다"를 숫자로 증명하는 데 집중
+
+B) Policy Engine 범위 확장 (README §4에서 예고했던 방향)
+   CPU 스케줄링 외에 메모리(페이지 폴트 패턴)·전력(ACPI) 신호 추가
+   → BETA-X에서 검증한 "런타임 관찰→자동 개입" 패턴을
+     CPU 외 다른 서브시스템에도 적용
+```
+
+A는 지금 만든 것의 신뢰도를 높이는 길, B는 Policy Engine의 범위를 README
+원래 비전(하드웨어 핑거프린팅, 전력 관리 포함)에 맞게 넓히는 길. 둘 다
+README §4 "다음 확장 방향" 체크리스트의 빈 항목들과 연결됨.
+
+---
+
+### BETA 16~28 (보류 — Linux/Arch 완전 호환, 나중에)
+
+> BETA-X 완료 후 재개. 진행 시 Phase A~F 순서를 따른다.
+
+| Phase | 내용 |
+|-------|------|
+| Phase C (BETA 16~17) | mprotect 완전 구현, Demand paging & 페이지 폴트 |
+| Phase D (BETA 19~21) | ELF .so 파서 & 재배치, 동적 링커(ld-musl 호환), musl-libc 내장 |
+| Phase E (BETA 22~24) | TCP/IP 실제 구현(smoltcp), DNS 리졸버, TLS/HTTPS |
+| Phase F (BETA 25~28) | 아카이브/압축(zstd), pacman-static 실행, glibc 호환성, 완전한 Arch 환경 |
+
+> **완료 기준:** Phase D → musl-linked 동적 바이너리 실행 / Phase E → `curl https://archlinux.org` 성공
+> / Phase F → `pacman -S neovim` 설치 후 실행 ✓
+
+---
 
 ### 드라이버 우선순위 노트
 

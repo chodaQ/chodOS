@@ -136,6 +136,13 @@ impl Scheduler {
         }
     }
 
+    /// 특정 PID의 선호 CPU를 설정 (BETA-X 5 core affinity).
+    pub fn set_preferred_cpu(&mut self, pid: Pid, cpu: u8) {
+        for p in self.processes.iter_mut() {
+            if p.pid == pid { p.preferred_cpu = cpu; return; }
+        }
+    }
+
     /// 선점형 컨텍스트 스위치 — 타이머/소프트 인터럽트 핸들러에서 호출.
     ///
     /// 1. 현재 RSP를 현재 프로세스의 `preempt_rsp`에 저장
@@ -203,10 +210,13 @@ impl Scheduler {
         }
 
         // 다음 후보 탐색: Ready 중 최고 effective_priority 찾기 (aging 반영)
-        let now = crate::interrupts::handlers::TICK.load(core::sync::atomic::Ordering::Relaxed);
-        let start = self.current;
-        let mut best_idx: Option<usize> = None;
-        let mut best_pri = Priority::Idle;
+        // BETA-X 5: 동순위 시 현재 코어 affinity 선호 프로세스 우선
+        let now    = crate::interrupts::handlers::TICK.load(core::sync::atomic::Ordering::Relaxed);
+        let my_cpu = crate::smp::current_cpu_id();
+        let start  = self.current;
+        let mut best_idx:      Option<usize> = None;
+        let mut best_pri       = Priority::Idle;
+        let mut best_same_cpu  = false; // 현재 best가 같은 코어 선호인지
 
         for i in 1..=count {
             let idx = (start + i) % count;
@@ -214,10 +224,20 @@ impl Scheduler {
             if p.state != ProcessState::Ready { continue; }
 
             let effective_pri = effective_priority(p, now);
+            // 미설정(u8::MAX) = 어느 코어든 무관 → same_cpu로 간주
+            let same_cpu = p.preferred_cpu == u8::MAX || p.preferred_cpu == my_cpu;
 
-            if best_idx.is_none() || effective_pri > best_pri {
-                best_pri = effective_pri;
-                best_idx = Some(idx);
+            let better = match best_idx {
+                None => true,
+                Some(_) => {
+                    effective_pri > best_pri
+                    || (effective_pri == best_pri && same_cpu && !best_same_cpu)
+                }
+            };
+            if better {
+                best_pri      = effective_pri;
+                best_idx      = Some(idx);
+                best_same_cpu = same_cpu;
             }
         }
 
@@ -244,6 +264,11 @@ impl Scheduler {
     }
 
     pub fn send_message(&mut self, to: Pid, msg: super::Message) -> bool {
+        // BETA-X 1: 송신 카운터 갱신 → Policy Engine에 이벤트 알림
+        let from = self.processes[self.current].pid;
+        let count = self.processes[self.current].record_ipc_send(to);
+        crate::policy::observe_ipc(from, to, count);
+
         for proc in self.processes.iter_mut() {
             if proc.pid == to {
                 proc.message_queue.push_back(msg);
@@ -298,6 +323,11 @@ pub fn keyboard_boost() {
 /// 우선순위 설정 (Policy Engine에서 호출, ALPHA 5)
 pub fn set_priority(pid: Pid, pri: Priority) {
     unsafe { get().set_priority(pid, pri); }
+}
+
+/// 선호 CPU 설정 (BETA-X 5 core affinity)
+pub fn set_preferred_cpu(pid: Pid, cpu: u8) {
+    unsafe { get().set_preferred_cpu(pid, cpu); }
 }
 
 /// 자발적 CPU 양보.
