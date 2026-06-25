@@ -41,18 +41,24 @@ static FAST_CHANNELS: Mutex<BTreeMap<(Pid, Pid), CapId>> = Mutex::new(BTreeMap::
 /// 채널 생성 시 512바이트 SharedBuffer를 사전 할당한다.
 /// Policy Engine의 `adapt_and_report`에서 임계값 초과 쌍에 대해 호출됨.
 pub fn ensure_channel(from: Pid, to: Pid) -> CapId {
+    ensure_channel_cap(from, to, 512)
+}
+
+/// capacity를 지정해 fast channel 생성 (A-1 페이로드 스윕용).
+///
+/// 이미 존재하면 기존 cap_id 반환 (idempotent).
+pub fn ensure_channel_cap(from: Pid, to: Pid, capacity: usize) -> CapId {
     {
         let table = FAST_CHANNELS.lock();
         if let Some(&cap_id) = table.get(&(from, to)) {
             return cap_id;
         }
     }
-    // 새 채널 생성 (lock 밖에서 alloc_shared 호출해 중첩 락 방지)
-    let cap_id = ipc_cap::alloc_shared(from, Vec::with_capacity(512));
+    let cap_id = ipc_cap::alloc_shared(from, Vec::with_capacity(capacity));
     FAST_CHANNELS.lock().insert((from, to), cap_id);
     crate::serial_println!(
-        "[ipc-X] fast channel 생성: pid{}→pid{} cap={}  (버퍼 512B 예약)",
-        from, to, cap_id,
+        "[ipc-X] fast channel 생성: pid{}→pid{} cap={}  (버퍼 {}B 예약)",
+        from, to, cap_id, capacity,
     );
     cap_id
 }

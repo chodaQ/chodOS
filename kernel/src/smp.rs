@@ -14,7 +14,7 @@
 //! 향후 SMP 스케줄러와 연결 예정.
 
 use alloc::collections::BTreeMap;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 use limine::mp::{MpGotoFunction, MpInfo, MpRespData};
 
@@ -32,6 +32,12 @@ static AP_ONLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// 전체 CPU 수 (BSP 포함)
 static CPU_TOTAL: AtomicUsize = AtomicUsize::new(1);
+
+/// A-2: AP별 실행할 함수 포인터 (0=idle, >0=fn() -> ! 주소)
+///
+/// BSP가 `assign_ap_work(idx, f)`를 호출하면 AP가 다음 poll에서 실행.
+/// 함수는 절대 반환하지 않아야 함 (-> !).
+static AP_WORK_FN: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 // ── AP 스택 ───────────────────────────────────────────────────────────────────
 
@@ -63,18 +69,20 @@ unsafe extern "C" fn ap_entry(info: &MpInfo) -> ! {
     crate::interrupts::ap_init();
 
     // AP 온라인 등록
+    // serial_println은 여기서 호출하지 않음:
+    // BSP와 동시에 serial 출력 시 QEMU BQL 경합으로 THRE가 영원히
+    // set되지 않아 wait_for_empty_transmit()이 무한 스핀한다.
+    // BSP가 AP_ONLINE 카운터와 타임아웃으로 AP 상태를 확인한다.
     AP_ONLINE.fetch_add(1, Ordering::SeqCst);
 
-    let lapic_id  = info.lapic_id;
-    let proc_id   = info.processor_id;
-    crate::serial_println!(
-        "[smp] AP #{} online  (lapic_id={}, processor_id={})",
-        ap_idx, lapic_id, proc_id
-    );
-
-    // AP 유휴 루프 — 향후 SMP 스케줄러와 연결 예정
+    // A-2: HLT 먼저 → 인터럽트 발생 시 깨어나서 work 슬롯 확인
     loop {
         core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+        let fn_ptr = AP_WORK_FN[ap_idx].load(Ordering::Acquire);
+        if fn_ptr != 0 {
+            let f: unsafe fn() -> ! = core::mem::transmute(fn_ptr);
+            f();
+        }
     }
 }
 
@@ -94,47 +102,55 @@ pub fn init(mp_resp: &MpRespData) {
         total, bsp_lapic
     );
 
+    // ── AP 시작 단계: bootstrap 호출 사이에 serial 출력 금지 ─────────────────
+    // bootstrap() 이후 AP가 실행되는 동안 BSP가 serial을 쓰면
+    // QEMU MTTCG BQL 경합으로 UART THRE 비트가 고착(stuck at 0)되어
+    // wait_for_empty_transmit()이 무한 스핀한다.
+    // → AP들이 모두 온라인이 된 후에 serial 출력을 재개한다.
     let mut ap_idx = 0usize;
     for cpu in cpus {
-        if cpu.lapic_id == bsp_lapic {
-            crate::serial_println!(
-                "[smp] CPU proc_id={} lapic_id={} → BSP (skip)",
-                cpu.processor_id, cpu.lapic_id
-            );
-            continue;
-        }
-        if ap_idx >= MAX_CPUS {
-            crate::serial_println!("[smp] MAX_CPUS={} 초과 — 나머지 AP 건너뜀", MAX_CPUS);
-            break;
-        }
-        crate::serial_println!(
-            "[smp] starting AP #{} (lapic_id={}, proc_id={})...",
-            ap_idx, cpu.lapic_id, cpu.processor_id
-        );
+        if cpu.lapic_id == bsp_lapic { continue; }
+        if ap_idx >= MAX_CPUS { break; }
         cpu.bootstrap(ap_entry as MpGotoFunction, ap_idx as u64);
         ap_idx += 1;
     }
 
-    // 모든 AP가 온라인이 될 때까지 스핀 대기 (최대 ~100ms)
+    // 모든 AP가 온라인이 될 때까지 스핀 대기 (최대 ~500ms)
     let expected = ap_idx;
     let mut spins = 0u64;
     while AP_ONLINE.load(Ordering::SeqCst) < expected {
         core::hint::spin_loop();
         spins += 1;
-        if spins > 50_000_000 {
-            crate::serial_println!(
-                "[smp] timeout — {}/{} APs responded",
-                AP_ONLINE.load(Ordering::SeqCst), expected
-            );
-            break;
+        if spins > 100_000_000 {
+            break; // timeout — 이후 serial 출력에서 실제 카운트 표시
         }
     }
 
+    // ── AP 온라인 확인 후 serial 출력 재개 ───────────────────────────────────
     let online = AP_ONLINE.load(Ordering::SeqCst);
+    if online < expected {
+        crate::serial_println!(
+            "[smp] timeout — {}/{} APs responded",
+            online, expected
+        );
+    }
     crate::serial_println!(
         "[smp] init done — BSP + {} AP(s) = {} core(s) total",
         online, online + 1
     );
+}
+
+/// A-2: AP에 작업 함수 할당.
+///
+/// `ap_idx`: 0-based AP 인덱스 (BSP 제외).
+/// `f`: 실행할 함수 (절대 반환하지 않아야 함 — `-> !`).
+///
+/// AP가 idle poll 중일 때 다음 사이클에 즉시 실행 시작.
+/// 이미 실행 중이면 완료 후 덮어쓰임 — 호출자가 완료 시점을 AtomicU8 플래그로 확인할 것.
+pub fn assign_ap_work(ap_idx: usize, f: unsafe fn() -> !) {
+    if ap_idx < MAX_CPUS {
+        AP_WORK_FN[ap_idx].store(f as u64, Ordering::Release);
+    }
 }
 
 /// 총 CPU 코어 수 (BSP + 온라인 AP)

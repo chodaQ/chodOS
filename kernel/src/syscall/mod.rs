@@ -559,6 +559,8 @@ fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: i64, offset: u64) -
 
     MMAP_TABLE.lock().insert(vaddr, pages);
     crate::serial_println!("[mmap] vaddr={:#x} pages={} fd={} off={:#x}", vaddr, pages, fd, offset);
+    // Policy B-1: mmap 호출 기록
+    crate::policy::observe_mmap(crate::process::scheduler::current_pid());
     vaddr as i64
 }
 

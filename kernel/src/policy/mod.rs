@@ -81,6 +81,43 @@ impl IpcEntry {
 /// IPC 핫-쌍 임계값: 이 횟수 이상이면 전용 채널 후보 (BETA-X 2에서 사용)
 pub const IPC_HOT_THRESHOLD: u64 = 100;
 
+// ── Policy B-1: 메모리 압력 추적 ─────────────────────────────────────────────
+
+#[derive(Copy, Clone)]
+struct MemEntry {
+    pid:         Pid,
+    mmap_calls:  u64, // 누적 mmap 호출 횟수
+    page_faults: u64, // 누적 페이지 폴트 횟수
+    last_mmap:   u64, // 마지막 창 기준 mmap (델타 계산)
+    last_faults: u64, // 마지막 창 기준 faults (델타 계산)
+    active:      bool,
+}
+
+impl MemEntry {
+    const fn empty() -> Self {
+        MemEntry { pid: 0, mmap_calls: 0, page_faults: 0, last_mmap: 0, last_faults: 0, active: false }
+    }
+}
+
+/// 창당 mmap 횟수가 이 이상이면 "메모리 활동 높음"
+const MEM_HOT_THRESHOLD: u64 = 10;
+const MAX_MEM_ENTRIES: usize = 16;
+
+// ── Policy B-2: 전력 상태 ────────────────────────────────────────────────────
+
+struct PowerStats {
+    last_aperf:    u64,
+    last_mperf:    u64,
+    /// 유휴율 EMA (×10 고정소수점, 초기 500 = 50.0%)
+    idle_pct_ema:  u64,
+}
+
+impl PowerStats {
+    const fn new() -> Self {
+        PowerStats { last_aperf: 0, last_mperf: 0, idle_pct_ema: 500 }
+    }
+}
+
 /// BETA-X 6: 창당 이 이하 메시지면 "cold" (채널 회수 후보)
 const DECAY_THRESHOLD: u64 = 5;
 
@@ -98,6 +135,10 @@ pub struct PolicyEngine {
     report_interval: u64,
     /// BETA-X 1: 프로세스 쌍별 IPC 빈도 테이블
     ipc_table: [IpcEntry; MAX_IPC_PAIRS],
+    /// Policy B-1: 프로세스별 메모리 압력 테이블
+    mem_table: [MemEntry; MAX_MEM_ENTRIES],
+    /// Policy B-2: 전력 상태
+    power: PowerStats,
 }
 
 impl PolicyEngine {
@@ -108,6 +149,8 @@ impl PolicyEngine {
             last_report_tick: 0,
             report_interval: 36,
             ipc_table: [IpcEntry::empty(); MAX_IPC_PAIRS],
+            mem_table: [MemEntry::empty(); MAX_MEM_ENTRIES],
+            power: PowerStats::new(),
         }
     }
 
@@ -182,6 +225,53 @@ impl PolicyEngine {
             }
         }
         self.ipc_table[min_i] = IpcEntry { from, to, count, active: true, last_count: 0, cold_windows: 0 };
+    }
+
+    /// Policy B-1: mmap 호출 1회 기록.
+    pub fn observe_mmap(&mut self, pid: Pid) {
+        for i in 0..MAX_MEM_ENTRIES {
+            if self.mem_table[i].active && self.mem_table[i].pid == pid {
+                self.mem_table[i].mmap_calls += 1;
+                return;
+            }
+        }
+        for i in 0..MAX_MEM_ENTRIES {
+            if !self.mem_table[i].active {
+                self.mem_table[i] = MemEntry {
+                    pid, mmap_calls: 1, page_faults: 0,
+                    last_mmap: 0, last_faults: 0, active: true,
+                };
+                return;
+            }
+        }
+        // 슬롯 가득 참 — 가장 적은 mmap 슬롯 교체
+        let mut min_i = 0;
+        for i in 1..MAX_MEM_ENTRIES {
+            if self.mem_table[i].mmap_calls < self.mem_table[min_i].mmap_calls { min_i = i; }
+        }
+        self.mem_table[min_i] = MemEntry {
+            pid, mmap_calls: 1, page_faults: 0,
+            last_mmap: 0, last_faults: 0, active: true,
+        };
+    }
+
+    /// Policy B-1: 페이지 폴트 1회 기록.
+    pub fn observe_page_fault(&mut self, pid: Pid) {
+        for i in 0..MAX_MEM_ENTRIES {
+            if self.mem_table[i].active && self.mem_table[i].pid == pid {
+                self.mem_table[i].page_faults += 1;
+                return;
+            }
+        }
+        for i in 0..MAX_MEM_ENTRIES {
+            if !self.mem_table[i].active {
+                self.mem_table[i] = MemEntry {
+                    pid, mmap_calls: 0, page_faults: 1,
+                    last_mmap: 0, last_faults: 0, active: true,
+                };
+                return;
+            }
+        }
     }
 
     /// BETA-X 2용: 임계값 이상의 핫 IPC 쌍을 `out`에 채우고 개수 반환.
@@ -329,6 +419,79 @@ impl PolicyEngine {
             }
         }
 
+        // ── Policy B-1: 메모리 압력 리포트 ──────────────────────────────────────
+        {
+            let mut any_mem = false;
+            for i in 0..MAX_MEM_ENTRIES {
+                if !self.mem_table[i].active { continue; }
+                let pid = self.mem_table[i].pid;
+                let mmap_delta  = self.mem_table[i].mmap_calls
+                                     .saturating_sub(self.mem_table[i].last_mmap);
+                let fault_delta = self.mem_table[i].page_faults
+                                     .saturating_sub(self.mem_table[i].last_faults);
+                self.mem_table[i].last_mmap   = self.mem_table[i].mmap_calls;
+                self.mem_table[i].last_faults = self.mem_table[i].page_faults;
+
+                if mmap_delta == 0 && fault_delta == 0 { continue; }
+                if !any_mem {
+                    crate::serial_println!("[policy-M] ── 메모리 압력 리포트 ──");
+                    any_mem = true;
+                }
+
+                let level = if mmap_delta >= MEM_HOT_THRESHOLD * 10 { "★★ 매우 높음" }
+                            else if mmap_delta >= MEM_HOT_THRESHOLD  { "★  높음     " }
+                            else                                       { "   보통     " };
+                crate::serial_println!(
+                    "[policy-M]   pid={} {:12}: mmap+{}회 fault+{}회 {}",
+                    pid, pid_name(pid), mmap_delta, fault_delta, level,
+                );
+                if mmap_delta >= MEM_HOT_THRESHOLD {
+                    crate::process::scheduler::set_priority(pid, crate::process::Priority::High);
+                    crate::serial_println!(
+                        "[policy-M]   └→ pid{} 메모리 할당 빈도 높음 → High 우선순위",
+                        pid,
+                    );
+                }
+            }
+        }
+
+        // ── Policy B-2: 전력 상태 리포트 ──────────────────────────────────────
+        {
+            let window = self.report_interval.max(1);
+            // busy_ticks: kernel_main(pid=0) 제외 모든 프로세스의 최근 실행 틱 합
+            let mut busy_ticks: u64 = 0;
+            for i in 0..MAX_PROCS {
+                if !self.stats[i].active || self.stats[i].pid == 0 { continue; }
+                busy_ticks += self.stats[i].recent_ticks;
+            }
+            let idle_ticks = window.saturating_sub(busy_ticks.min(window));
+            let idle_pct_raw = (idle_ticks * 100) / window;
+
+            // EMA 평활화 (α=0.3, ×10 고정소수점)
+            let new_ema = (3 * idle_pct_raw * 10 + 7 * self.power.idle_pct_ema) / 10;
+            self.power.idle_pct_ema = new_ema;
+            let idle_display = new_ema / 10;
+
+            // MSR 기반 주파수 활용률 (QEMU TCG에서 0일 수 있음)
+            let freq_pct = crate::power::freq_util_pct(
+                self.power.last_aperf,
+                self.power.last_mperf,
+            );
+            self.power.last_aperf = crate::power::read_aperf();
+            self.power.last_mperf = crate::power::read_mperf();
+
+            let idle_mode = crate::power::recommend_idle(idle_display);
+            crate::serial_println!(
+                "[policy-P] 전력 상태: 유휴율={:3}% 주파수활용={:3}% → 권고={}",
+                idle_display, freq_pct, idle_mode.name(),
+            );
+            if freq_pct == 0 && self.power.last_mperf == 0 {
+                crate::serial_println!(
+                    "[policy-P]   (주파수=0: QEMU TCG — MSR APERF/MPERF 미지원, TICK 기반 유휴율만 유효)"
+                );
+            }
+        }
+
         // BETA-X 6: cold 창 감지 → 채널 회수(decay)
         for i in 0..MAX_IPC_PAIRS {
             if !self.ipc_table[i].active { continue; }
@@ -417,4 +580,14 @@ pub fn observe_ipc(from: Pid, to: Pid, count: u64) {
 /// BETA-X 2용: 임계값 이상의 IPC 핫 쌍 목록 반환.
 pub fn hot_ipc_pairs(threshold: u64, out: &mut [(Pid, Pid)], max: usize) -> usize {
     unsafe { (*core::ptr::addr_of_mut!(ENGINE)).hot_ipc_pairs(threshold, out, max) }
+}
+
+/// Policy B-1: sys_mmap 호출 시 기록 — syscall/mod.rs sys_mmap에서 호출.
+pub fn observe_mmap(pid: Pid) {
+    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).observe_mmap(pid); }
+}
+
+/// Policy B-1: 페이지 폴트 발생 시 기록 — exception_handler #PF에서 호출.
+pub fn observe_page_fault(pid: Pid) {
+    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).observe_page_fault(pid); }
 }

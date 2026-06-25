@@ -20,7 +20,10 @@
 
 extern crate alloc;
 
+mod bench_a1;     // BETA-X 검증 A-1: 페이로드 크기 스윕
+mod bench_a2;     // BETA-X 검증 A-2: -smp 4 멀티코어 레이턴시 비교
 mod bench_ipc;    // BETA-X 7: IPC 레이턴시 A/B 벤치마크
+mod power;        // Policy B-2: 전력 관리 보조 모듈
 mod elf;
 mod fb;
 mod gfx_ipc;     // BETA-X 3: WM ↔ GFX 드라이버 IPC 채널 시연
@@ -150,6 +153,35 @@ fn decay_send_task() -> ! {
     serial_println!("[decay-send] 130회 송신 완료 → 이후 침묵 (cold 카운트 시작)");
     // 이후 메시지 없음 → Policy Engine이 cold 창 감지 → 채널 회수
     loop { process::scheduler::yield_now(); }
+}
+
+// ==================== Policy B: 메모리 압력 + 전력 신호 ====================
+
+fn mem_stress_task() -> ! {
+    let pid = process::scheduler::current_pid();
+    serial_println!("[mem-stress] 시작 (pid={})", pid);
+    let mut n: u64 = 0;
+    loop {
+        // mmap 압력 시뮬레이션 — Policy Engine에 직접 알림
+        // (실제 시스템에서는 sys_mmap 훅이 자동으로 이 역할을 함)
+        policy::observe_mmap(pid);
+        n += 1;
+        if n % 20 == 0 {
+            process::scheduler::yield_now();
+        }
+    }
+}
+
+fn cpu_stress_task() -> ! {
+    serial_println!("[cpu-stress] 시작 — busy loop (타이머 선점 전용)");
+    // 선점형 스케줄러에 의해 강제 전환됨 → forced_preempts 증가 → idle_pct 감소
+    let mut x: u64 = 0xDEAD_BEEF;
+    loop {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        // yield 없음 — 타이머에 의해만 전환
+        if x == 0 { break; } // 절대 실행 안 됨 (컴파일러 최적화 방지)
+    }
+    unreachable!()
 }
 
 // ==================== ALPHA 14: 내장 테스트 ELF 바이너리 ====================
@@ -865,6 +897,134 @@ pub extern "C" fn _start() -> ! {
     process::scheduler::kill_pid(b7_recv);
     process::scheduler::kill_pid(b7_send);
     serial_println!("--- BETA-X 7 demo complete ---\n");
+
+    // ── Policy B: 메모리 압력 + 전력 신호 관찰 ──────────────────────────────
+    serial_println!("===========================================");
+    serial_println!("  Policy B: 메모리·전력 관찰");
+    serial_println!("  B-1: mmap 압력 계측 → 우선순위 자동 조정");
+    serial_println!("  B-2: CPU 유휴율 + APERF/MPERF 주파수 추적");
+    serial_println!("===========================================");
+
+    // Phase 1: mem_stress + cpu_stress 동시 실행 → "고부하 + 메모리 압박" 창
+    let pb_mem = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(pb_mem, "mem_stress", mem_stress_task)
+    );
+    let pb_cpu = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(pb_cpu, "cpu_stress", cpu_stress_task)
+    );
+
+    serial_println!("[policy-B] Phase 1: 고부하 + 메모리 압박 관찰 중...");
+    let pb_start = interrupts::handlers::TICK.load(Ordering::Relaxed);
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - pb_start < 40 {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+    serial_println!("[policy-B] Phase 1 완료 (Policy Engine 리포트 1회 이상 실행됨)\n");
+
+    // Phase 2: cpu_stress 종료 → 유휴율 상승 관찰
+    process::scheduler::kill_pid(pb_cpu);
+    serial_println!("[policy-B] Phase 2: cpu_stress 종료 → 유휴율 상승 관찰 중...");
+    let pb2_start = interrupts::handlers::TICK.load(Ordering::Relaxed);
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - pb2_start < 40 {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+    serial_println!("[policy-B] Phase 2 완료 — 유휴율 변화 로그 확인\n");
+
+    process::scheduler::kill_pid(pb_mem);
+    serial_println!("--- Policy B demo complete ---\n");
+
+    // ── BETA-X A-1: 페이로드 크기 스윕 ──────────────────────────────────────
+    serial_println!("===========================================");
+    serial_println!("  BETA-X A-1: 페이로드 크기 스윕");
+    serial_println!("  64B / 128B / 256B / 512B / 1024B");
+    serial_println!("  Phase A: 일반 IPC  Phase B: fast channel");
+    serial_println!("  각 크기당 n={} 샘플 (이상치 12.5% 제거)", bench_a1::N_PER);
+    serial_println!("===========================================");
+
+    bench_a1::A1_IDX.store(0, Ordering::Relaxed);
+    bench_a1::A1_DONE.store(0, Ordering::Relaxed);
+    bench_a1::A1_RECV_PID.store(0, Ordering::Relaxed);
+
+    let a1_recv = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(a1_recv, "a1_recv", bench_a1::a1_receiver_task)
+    );
+    let a1_send = process::scheduler::alloc_pid();
+    process::scheduler::spawn(
+        process::Process::new(a1_send, "a1_send", bench_a1::a1_sender_task)
+    );
+
+    // 완료 대기 (크기 5개 × 64회 샘플 → 시간 소요)
+    loop {
+        if bench_a1::A1_DONE.load(Ordering::Relaxed) == 1
+            && bench_a1::A1_IDX.load(Ordering::Relaxed) >= bench_a1::N_PER * 10
+        {
+            break;
+        }
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+
+    bench_a1::report();
+
+    process::scheduler::kill_pid(a1_recv);
+    process::scheduler::kill_pid(a1_send);
+    serial_println!("--- BETA-X A-1 complete ---\n");
+
+    // ── BETA-X A-2: 멀티코어 레이턴시 비교 ──────────────────────────────────
+    serial_println!("===========================================");
+    serial_println!("  BETA-X A-2: 멀티코어 IPC 레이턴시 비교");
+    serial_println!("  Phase A: AP1→BSP cross-core AtomicU64 ping-pong");
+    serial_println!("  Phase B: BSP→BSP same-core yield ping-pong");
+    serial_println!("  n={} samples each", bench_a2::N);
+    serial_println!("===========================================");
+
+    if smp::ap_count() >= 1 {
+        // Phase A: AP1에 sender 할당, BSP가 receiver 직접 실행
+        bench_a2::A2_PING.store(0, Ordering::Relaxed);
+        bench_a2::A2_PONG.store(0, Ordering::Relaxed);
+        bench_a2::A2_IDX_A.store(0, Ordering::Relaxed);
+        bench_a2::A2_DONE.store(1, Ordering::Relaxed);
+
+        smp::assign_ap_work(0, bench_a2::ap_sender_phase_a);
+
+        // BSP가 receiver로 동작 (블로킹 루프, AP1 ping 대기)
+        bench_a2::bsp_receiver_phase_a();
+
+        // Phase A 완료 대기 (A2_DONE=2 설정됨)
+        while bench_a2::A2_DONE.load(Ordering::Relaxed) < 2 {
+            unsafe { core::arch::asm!("pause", options(nomem, nostack, preserves_flags)); }
+        }
+
+        // Phase B: BSP에서 sender/receiver를 스케줄러 프로세스로 실행
+        bench_a2::A2_PING.store(0, Ordering::Relaxed);
+        bench_a2::A2_PONG.store(0, Ordering::Relaxed);
+        bench_a2::A2_IDX_B.store(0, Ordering::Relaxed);
+
+        let a2_send = process::scheduler::alloc_pid();
+        process::scheduler::spawn(
+            process::Process::new(a2_send, "a2_send", bench_a2::bsp_b_sender_task)
+        );
+        let a2_recv = process::scheduler::alloc_pid();
+        process::scheduler::spawn(
+            process::Process::new(a2_recv, "a2_recv", bench_a2::bsp_b_receiver_task)
+        );
+
+        // Phase B 완료 대기 (A2_DONE=3)
+        loop {
+            if bench_a2::A2_DONE.load(Ordering::Relaxed) >= 3 { break; }
+            unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+        }
+
+        process::scheduler::kill_pid(a2_send);
+        process::scheduler::kill_pid(a2_recv);
+
+        bench_a2::report();
+    } else {
+        serial_println!("[a2] AP 없음 (단일코어 모드) — A-2 건너뜀");
+        serial_println!("[a2] QEMU 실행 시 -smp 4 옵션 확인 (Makefile에 이미 포함)");
+    }
+    serial_println!("--- BETA-X A-2 complete ---\n");
 
     // ── ALPHA 13 → 14 연속 데모 ──────────────────────────────────────────────
     //

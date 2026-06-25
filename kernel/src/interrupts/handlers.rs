@@ -74,6 +74,10 @@ pub extern "C" fn exception_handler(frame: &ExceptionFrame) {
     // BETA 10: 유저모드 폴트(CS & 3 == 3) → SIGSEGV/SIGBUS 전달 후 프로세스 종료
     let is_user = frame.cs & 3 == 3;
     if is_user && (vec == 14 || vec == 17) {
+        // Policy B-1: 유저 모드 페이지 폴트/버스 에러 기록
+        if vec == 14 {
+            crate::policy::observe_page_fault(crate::process::scheduler::current_pid());
+        }
         let sig = if vec == 14 { crate::signal::SIGSEGV } else { crate::signal::SIGBUS };
         crate::serial_println!("\n[signal] user fault vec={} CR2={:#x} → sig={}", vec, cr2, sig);
         crate::signal::raise_signal(sig);

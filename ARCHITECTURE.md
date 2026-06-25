@@ -513,15 +513,158 @@ A) BETA-X 검증 강화
    -smp 4 멀티코어 + 64B 초과 페이로드로 재측정
    → "진짜 효과 있다"를 숫자로 증명하는 데 집중
 
-B) Policy Engine 범위 확장 (README §4에서 예고했던 방향)
+B) Policy Engine 범위 확장 (README §4에서 예고했던 방향)  ← 선택됨 ✅
    CPU 스케줄링 외에 메모리(페이지 폴트 패턴)·전력(ACPI) 신호 추가
    → BETA-X에서 검증한 "런타임 관찰→자동 개입" 패턴을
      CPU 외 다른 서브시스템에도 적용
 ```
 
+**Policy B 구현 현황:**
+
+| 서브시스템 | 관찰 신호 | 자동 개입 | 상태 |
+|-----------|---------|---------|------|
+| B-1 메모리 | mmap 호출 횟수(sys_mmap 훅), #PF 페이지 폴트(exception_handler 훅) | mmap 빈도 높으면 High 우선순위 자동 승격 | ✅ |
+| B-2 전력 | TICK 기반 CPU 유휴율 EMA, MSR APERF/MPERF 주파수 활용률 | C-state 권고(C0/C1-HLT/C2-MWAIT) 로그 출력 | ✅ |
+
+**QEMU 환경 한계:**
+- MSR APERF/MPERF: TCG 에뮬레이션에서 0 반환 → TICK 기반 유휴율이 실질 지표
+- MWAIT: 구현되어 있으나 QEMU에서는 HLT와 동일한 효과
+- 실 하드웨어(Intel, AMD)에서는 주파수 활용률과 C-state 절환 효과가 실측 가능
+
 A는 지금 만든 것의 신뢰도를 높이는 길, B는 Policy Engine의 범위를 README
 원래 비전(하드웨어 핑거프린팅, 전력 관리 포함)에 맞게 넓히는 길. 둘 다
 README §4 "다음 확장 방향" 체크리스트의 빈 항목들과 연결됨.
+
+---
+
+### BETA-X 검증 강화 로드맵 (Option A)
+
+> 현재 BETA-X 7 결과: fast channel이 오히려 0.9× 느림 (QEMU 1코어, 64B 페이로드).
+> 이 로드맵은 "QEMU 환경의 측정 조건이 불리했다"는 가설을 숫자로 검증한다.
+> 각 단계는 독립 실험으로, 앞 단계 결과에 따라 다음 단계 여부를 결정한다.
+
+#### A-1. 페이로드 크기 스윕 ✅
+
+**가설**: 64B 페이로드에서는 fast path 오버헤드가 이득보다 크지만,
+페이로드가 커질수록 SharedBuffer 재사용 이득이 dominant해진다.
+
+```
+측정 방법: bench_ipc.rs의 payload 크기를 파라미터화
+  64B   → 현재 기준선 (0.9×)
+  128B  → 일반 IPC는 truncation 발생, fast path는 온전히 전달
+  256B  → 차이 더 명확
+  512B  → SharedBuffer 예약 크기(512B)와 일치 — 재할당 0회 기대
+  1KB   → SharedBuffer 확장 필요 (테스트 목적으로 1KB로 변경)
+
+완료 기준: 특정 크기 X 이상에서 fast channel이 1.0× 이상 달성
+예상 분기점: 128B~256B (64B copy 비용이 VecDeque push와 역전되는 지점)
+```
+
+**구현 변경 최소**: `bench_ipc.rs`에 `BENCH_PAYLOAD_SIZE: usize` 상수 추가,
+`SharedBuffer` 초기 capacity를 파라미터화.
+
+---
+
+#### A-2. QEMU -smp 4 멀티코어 검증 ✅
+
+**가설**: 단일 코어에서는 core affinity(BETA-X 5)가 무의미하지만,
+멀티코어에서는 hot pair가 같은 코어에 고정되어 캐시 지역성 이득이 실측된다.
+
+```
+환경: Makefile -smp 4 (기존에 이미 설정됨)
+  smp::init() → 4개 CPU 감지 → AP 3개 온라인 (확인됨)
+
+구현 방식 (AP 작업 슬롯):
+  AP들이 HLT 루프 대신 AtomicU64 spin-poll 루프로 변경.
+  smp::assign_ap_work(idx, fn_ptr): BSP가 AP에 함수 할당.
+  → LAPIC/IPI 없이 AP 실행 가능.
+
+측정 (bench_a2.rs):
+  Phase A: AP1(sender) → BSP(receiver) cross-core AtomicU64 ping-pong
+           서로 다른 코어 → cache coherence(MESI) 오버헤드 포함
+  Phase B: BSP(sender) → BSP(receiver) same-core, yield 교대 실행
+           같은 코어 → L1/L2 캐시 hot 기대
+
+주의사항:
+  Phase B에는 yield 오버헤드 2회 포함(Phase A는 spin-wait).
+  QEMU TCG: 캐시 미시뮬레이션 → 실 하드웨어에서 재측정 필요.
+  "구조적으로 cross-core atomic vs same-core atomic 차이" 자체는 측정됨.
+```
+
+---
+
+#### A-3. 고빈도 연속 송신 처리량 측정 (Throughput)
+
+**가설**: 레이턴시가 아닌 처리량(messages/sec)에서는 fast channel이
+더 유리하다. 힙 재할당 제거 효과가 연속 송신에서 누적됨.
+
+```
+측정 방법: 레이턴시 대신 처리량 측정
+  기준: 36틱(≈2초) 동안 몇 개의 메시지를 성공적으로 송수신했나?
+  Phase A: 일반 IPC — VecDeque 재할당이 발생할 수 있음
+  Phase B: fast channel — overwrite_shared는 capacity 유지, 재할당 없음
+
+  측정 지표:
+    msgs_per_window_A  ← 36틱 내 수신 메시지 수 (일반)
+    msgs_per_window_B  ← 36틱 내 수신 메시지 수 (fast)
+    throughput_ratio   = B / A
+
+완료 기준: B/A > 1.0 (어느 페이로드 크기에서든)
+```
+
+**구현 추가**: `bench_ipc.rs`에 throughput 측정 모드 추가 (`BENCH_MODE::Throughput`).
+
+---
+
+#### A-4. 측정 노이즈 제거 — rdtsc 정밀도 개선
+
+**현재 문제**: rdtsc 델타에 컨텍스트 스위치 오버헤드가 포함됨.
+단일 코어에서 send→yield→recv 경로는 최소 1번의 전체 스케줄러 순회를 포함.
+
+```
+개선 방향:
+  방법 1: 같은 프로세스 내에서 send + recv (동일 태스크, 루프백)
+           → 컨텍스트 스위치 없음, 순수 IPC 메커니즘 비용만 측정
+           → 단, 실제 cross-process IPC 비용과 다름
+
+  방법 2: rdtsc 웜업 (최초 N회 폐기 후 측정)
+           → 캐시 콜드 스타트 노이즈 제거
+           → bench_ipc.rs에 BENCH_WARMUP 상수 추가
+
+  방법 3: 중앙값(median) 사용 — min/avg/max 대신
+           → 이상치(스케줄러 지연 spike) 영향 제거
+           → 64 샘플 정렬 후 p50(median), p95 리포트
+
+권고: 방법 2+3 조합이 구현 부담 가장 낮고 효과적
+```
+
+---
+
+#### 검증 로드맵 요약 및 판단 기준
+
+```
+A-1 (페이로드 스윕)
+  → 128B 이상에서 fast > baseline: 검증 성공, A-3으로 진행
+  → 모든 크기에서 fast <= baseline: 근본적 설계 재검토 필요
+
+A-3 (처리량)
+  → throughput B/A > 1.0: "fast channel은 대용량 고빈도에 유리"로 결론
+  → throughput B/A <= 1.0: SharedBuffer 오버헤드가 생각보다 큼
+
+A-2 (멀티코어) ✅
+  → AP spin-poll 루프 + AtomicU64 ping-pong으로 구현
+  → Phase A(cross-core) vs Phase B(same-core yield) 측정 인프라 완성
+  → QEMU TCG: 캐시 효과 실측 어려움 — 실 하드웨어 재측정 필요
+
+A-4 (노이즈 제거)
+  → A-1~A-3과 병행, 언제든 적용 가능
+  → 결과 해석이 불안정할 때마다 먼저 적용
+```
+
+> **최종 목표**: A-1에서 특정 페이로드 임계점을 찾고, A-3에서 처리량 우위를
+> 확인하면 "BETA-X fast channel은 64B 초과 고빈도 메시지에 유효"로 결론 짓는다.
+> 그 이하 페이로드에서는 일반 IPC가 더 효율적임을 문서화하고,
+> Policy Engine의 채널 생성 조건에 "페이로드 크기 힌트" 파라미터를 추가한다.
 
 ---
 
