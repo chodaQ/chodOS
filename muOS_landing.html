@@ -17,7 +17,7 @@
     --muted: #86868b;
   }
 
-  html { scroll-behavior: smooth; }
+  html { scroll-behavior: smooth; background: var(--bg); }
 
   body {
     background: var(--bg);
@@ -674,6 +674,14 @@ make run-gui  <span style="color:var(--muted)"># 빌드 + QEMU GUI + VirtIO</spa
     { threshold: 0.12 }
   );
   document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+  // iframe 안에서는 내장 nav 숨김 (mukit이 이미 nav 제공)
+  if (window.top !== window.self) {
+    const nav = document.querySelector('nav');
+    if (nav) nav.style.display = 'none';
+    const hero = document.getElementById('hero');
+    if (hero) hero.style.paddingTop = '60px';
+  }
 </script>
 </body>
 </html>
