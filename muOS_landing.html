@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MuKernel — Autonomous Operating System</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --accent: #a78bfa;
+    --accent2: #60a5fa;
+    --bg: #000;
+    --surface: #0a0a0a;
+    --border: rgba(255,255,255,0.08);
+    --text: #f5f5f7;
+    --muted: #86868b;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  /* ── NAV ── */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    height: 48px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 40px;
+    background: rgba(0,0,0,0.72);
+    backdrop-filter: blur(20px) saturate(180%);
+    border-bottom: 1px solid var(--border);
+  }
+  nav .logo { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; color: #fff; }
+  nav .logo span { color: var(--accent); }
+  nav ul { display: flex; gap: 32px; list-style: none; }
+  nav ul a { font-size: 13px; color: var(--muted); text-decoration: none; transition: color .2s; }
+  nav ul a:hover { color: #fff; }
+  nav .badge {
+    font-size: 11px; font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    letter-spacing: .05em;
+  }
+
+  /* ── HERO ── */
+  #hero {
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center;
+    padding: 120px 40px 80px;
+    position: relative; overflow: hidden;
+  }
+  #hero::before {
+    content: '';
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse 70% 50% at 50% -10%, rgba(167,139,250,0.25) 0%, transparent 60%),
+      radial-gradient(ellipse 40% 30% at 80% 80%, rgba(96,165,250,0.12) 0%, transparent 50%),
+      radial-gradient(ellipse 40% 30% at 20% 80%, rgba(167,139,250,0.08) 0%, transparent 50%);
+    pointer-events: none;
+  }
+  .hero-eyebrow {
+    font-size: 13px; font-weight: 600; letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 24px;
+    opacity: 0; animation: fadeUp .6s .1s forwards;
+  }
+  .hero-title {
+    font-size: clamp(64px, 10vw, 112px);
+    font-weight: 800;
+    letter-spacing: -.05em;
+    line-height: .92;
+    margin-bottom: 28px;
+    opacity: 0; animation: fadeUp .7s .2s forwards;
+  }
+  .hero-title .grad {
+    background: linear-gradient(135deg, #fff 30%, rgba(167,139,250,0.9));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .hero-sub {
+    font-size: clamp(17px, 2.2vw, 24px);
+    color: var(--muted);
+    max-width: 540px;
+    line-height: 1.5;
+    margin-bottom: 48px;
+    opacity: 0; animation: fadeUp .7s .3s forwards;
+  }
+  .hero-sub strong { color: rgba(255,255,255,0.7); font-weight: 500; }
+  .hero-cta {
+    display: flex; gap: 12px; flex-wrap: wrap; justify-content: center;
+    margin-bottom: 80px;
+    opacity: 0; animation: fadeUp .7s .4s forwards;
+  }
+  .btn-primary {
+    display: inline-flex; align-items: center; gap-8px; gap: 8px;
+    padding: 14px 28px;
+    background: var(--accent);
+    color: #000;
+    font-size: 15px; font-weight: 600; border-radius: 980px;
+    text-decoration: none; transition: opacity .2s, transform .1s;
+  }
+  .btn-primary:hover { opacity: .88; transform: scale(1.02); }
+  .btn-ghost {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 14px 28px;
+    color: #fff;
+    font-size: 15px; font-weight: 500; border-radius: 980px;
+    text-decoration: none;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.06);
+    transition: background .2s, transform .1s;
+  }
+  .btn-ghost:hover { background: rgba(255,255,255,0.12); transform: scale(1.02); }
+
+  /* ── MILESTONE STRIP ── */
+  .milestones {
+    display: flex; align-items: center; gap: 0;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: rgba(255,255,255,0.03);
+    overflow: hidden;
+    opacity: 0; animation: fadeUp .7s .5s forwards;
+  }
+  .milestone {
+    padding: 20px 32px; text-align: center;
+    border-right: 1px solid var(--border);
+    flex: 1;
+  }
+  .milestone:last-child { border-right: none; }
+  .milestone .ms-label { font-size: 11px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 6px; }
+  .milestone .ms-val { font-size: 22px; font-weight: 700; }
+  .ms-done { color: var(--accent); }
+  .ms-wip { color: var(--accent2); }
+  .ms-next { color: #4ade80; }
+
+  /* ── SECTION COMMON ── */
+  section { padding: 100px 40px; }
+  .section-inner { max-width: 980px; margin: 0 auto; }
+  .section-eyebrow {
+    font-size: 13px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 12px;
+  }
+  .section-title {
+    font-size: clamp(36px, 5vw, 52px);
+    font-weight: 700; letter-spacing: -.03em; line-height: 1.08;
+    margin-bottom: 20px;
+  }
+  .section-desc { font-size: 19px; color: var(--muted); line-height: 1.6; max-width: 600px; }
+
+  /* ── DISCOVERY CALLOUT ── */
+  #discovery {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .discovery-card {
+    background: linear-gradient(135deg, rgba(167,139,250,0.08), rgba(96,165,250,0.06));
+    border: 1px solid rgba(167,139,250,0.2);
+    border-radius: 24px;
+    padding: 48px;
+    margin-top: 40px;
+  }
+  .discovery-card .dc-label {
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin-bottom: 16px;
+  }
+  .discovery-card .dc-claim {
+    font-size: clamp(24px, 4vw, 38px); font-weight: 700; letter-spacing: -.02em;
+    line-height: 1.15; margin-bottom: 24px;
+  }
+  .discovery-card .dc-claim em {
+    font-style: normal;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .disc-compare {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 32px;
+  }
+  .disc-box {
+    padding: 20px 24px; border-radius: 14px;
+    font-size: 14px; line-height: 1.6;
+  }
+  .disc-box.wrong { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.15); }
+  .disc-box.right { background: rgba(74,222,128,0.08); border: 1px solid rgba(74,222,128,0.15); }
+  .disc-box .tag { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 8px; }
+  .disc-box.wrong .tag { color: #f87171; }
+  .disc-box.right .tag { color: #4ade80; }
+  .disc-box p { color: rgba(255,255,255,0.7); }
+  .disc-box strong { color: #fff; }
+
+  /* ── ARCHITECTURE ── */
+  #architecture { background: var(--bg); }
+  .arch-diagram {
+    margin-top: 48px;
+    border: 1px solid var(--border); border-radius: 20px;
+    overflow: hidden; background: var(--surface);
+  }
+  .arch-layer {
+    padding: 28px 36px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: flex-start; gap: 24px;
+  }
+  .arch-layer:last-child { border-bottom: none; }
+  .arch-layer-label {
+    font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); width: 80px; flex-shrink: 0; padding-top: 4px;
+  }
+  .arch-items { display: flex; gap: 12px; flex-wrap: wrap; }
+  .arch-chip {
+    padding: 8px 16px; border-radius: 8px;
+    font-size: 13px; font-weight: 500;
+    border: 1px solid;
+  }
+  .chip-user { background: rgba(167,139,250,0.1); border-color: rgba(167,139,250,0.25); color: var(--accent); }
+  .chip-compat { background: rgba(96,165,250,0.1); border-color: rgba(96,165,250,0.25); color: var(--accent2); }
+  .chip-kernel { background: rgba(74,222,128,0.1); border-color: rgba(74,222,128,0.25); color: #4ade80; }
+  .chip-hw { background: rgba(251,191,36,0.1); border-color: rgba(251,191,36,0.25); color: #fbbf24; }
+  .arch-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  /* ── POLICY ENGINE ── */
+  #policy { background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .policy-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 48px; }
+  .policy-card {
+    padding: 28px 24px; border-radius: 18px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    transition: border-color .2s, background .2s;
+  }
+  .policy-card:hover { border-color: rgba(167,139,250,0.3); background: rgba(167,139,250,0.04); }
+  .policy-card .pc-icon { font-size: 28px; margin-bottom: 16px; }
+  .policy-card .pc-title { font-size: 17px; font-weight: 600; margin-bottom: 8px; }
+  .policy-card .pc-desc { font-size: 14px; color: var(--muted); line-height: 1.6; }
+  .policy-card code { font-size: 12px; background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; color: var(--accent); font-family: "SF Mono", monospace; }
+
+  /* ── PROGRESS ── */
+  #progress { background: var(--bg); }
+  .progress-list { margin-top: 48px; display: flex; flex-direction: column; gap: 0; border: 1px solid var(--border); border-radius: 20px; overflow: hidden; }
+  .progress-item {
+    display: flex; align-items: center; gap: 16px;
+    padding: 18px 28px;
+    border-bottom: 1px solid var(--border);
+    font-size: 15px;
+    transition: background .15s;
+  }
+  .progress-item:last-child { border-bottom: none; }
+  .progress-item:hover { background: rgba(255,255,255,0.02); }
+  .pi-status { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
+  .pi-done { background: rgba(74,222,128,0.15); color: #4ade80; border: 1px solid rgba(74,222,128,0.3); }
+  .pi-wip { background: rgba(251,191,36,0.15); color: #fbbf24; border: 1px solid rgba(251,191,36,0.3); }
+  .pi-todo { background: rgba(255,255,255,0.05); color: var(--muted); border: 1px solid var(--border); }
+  .pi-text { flex: 1; }
+  .pi-text strong { font-weight: 500; }
+  .pi-text small { font-size: 12px; color: var(--muted); margin-left: 8px; }
+  .pi-badge { font-size: 11px; padding: 3px 10px; border-radius: 980px; font-weight: 600; letter-spacing: .04em; }
+  .badge-alpha { background: rgba(167,139,250,0.15); color: var(--accent); }
+  .badge-beta { background: rgba(96,165,250,0.15); color: var(--accent2); }
+  .badge-betax { background: linear-gradient(90deg,rgba(167,139,250,0.2),rgba(96,165,250,0.2)); color: #c4b5fd; }
+
+  /* ── STACK ── */
+  #stack { background: var(--surface); border-top: 1px solid var(--border); }
+  .stack-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 48px; }
+  .stack-card {
+    padding: 28px; border-radius: 18px;
+    border: 1px solid var(--border);
+    background: rgba(255,255,255,0.02);
+  }
+  .stack-card .sc-name { font-size: 28px; font-weight: 800; letter-spacing: -.02em; margin-bottom: 6px; }
+  .stack-card .sc-role { font-size: 13px; color: var(--muted); }
+  .rust { color: #f97316; }
+  .limine { color: var(--accent); }
+  .qemu { color: var(--accent2); }
+
+  /* ── FOOTER ── */
+  footer {
+    padding: 60px 40px 40px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  footer .dev-note {
+    font-size: 15px; color: rgba(255,255,255,0.5);
+    margin-bottom: 12px; line-height: 1.6;
+  }
+  footer .dev-note strong { color: #fff; }
+
+  /* ── ANIMATIONS ── */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .reveal { opacity: 0; transform: translateY(24px); transition: opacity .6s, transform .6s; }
+  .reveal.visible { opacity: 1; transform: none; }
+
+  /* ── TABLE ── */
+  .compare-table { width: 100%; border-collapse: collapse; margin-top: 40px; font-size: 14px; }
+  .compare-table th { padding: 12px 20px; text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); }
+  .compare-table td { padding: 16px 20px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .compare-table td:first-child { color: var(--muted); font-size: 13px; }
+  .compare-table td:nth-child(2) { color: rgba(255,255,255,0.5); }
+  .compare-table td:nth-child(3) { color: #fff; font-weight: 500; }
+  .compare-table td:nth-child(3) .highlight { color: var(--accent); }
+
+  @media (max-width: 700px) {
+    nav ul { display: none; }
+    section { padding: 64px 20px; }
+    .milestones { flex-direction: column; }
+    .milestone { border-right: none; border-bottom: 1px solid var(--border); }
+    .disc-compare { grid-template-columns: 1fr; }
+    .policy-grid { grid-template-columns: 1fr; }
+    .stack-grid { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="logo">Mu<span>Kernel</span></div>
+  <ul>
+    <li><a href="#discovery">Discovery</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#policy">Policy Engine</a></li>
+    <li><a href="#progress">Progress</a></li>
+    <li><a href="#stack">Stack</a></li>
+  </ul>
+  <div class="badge">BETA-X COMPLETE</div>
+</nav>
+
+<!-- HERO -->
+<section id="hero">
+  <div class="hero-eyebrow">Rust · x86_64 · Microkernel · Autonomous</div>
+  <h1 class="hero-title"><span class="grad">MuKernel</span></h1>
+  <p class="hero-sub">
+    <strong>아치 리눅스의 자유도</strong>와 <strong>macOS의 편안함</strong>.<br>
+    사용자는 의도만 설정하고, OS가 알아서 최적화한다.
+  </p>
+  <div class="hero-cta">
+    <a href="#architecture" class="btn-primary">아키텍처 보기</a>
+    <a href="#discovery" class="btn-ghost">핵심 발견 →</a>
+  </div>
+  <div class="milestones">
+    <div class="milestone">
+      <div class="ms-label">Alpha</div>
+      <div class="ms-val ms-done">1–17 ✓</div>
+    </div>
+    <div class="milestone">
+      <div class="ms-label">Beta</div>
+      <div class="ms-val ms-done">1–15 ✓</div>
+    </div>
+    <div class="milestone">
+      <div class="ms-label">Beta-X</div>
+      <div class="ms-val ms-wip">완료 ✓</div>
+    </div>
+    <div class="milestone">
+      <div class="ms-label">Next</div>
+      <div class="ms-val ms-next">Fast Channel</div>
+    </div>
+  </div>
+</section>
+
+<!-- DISCOVERY -->
+<section id="discovery">
+  <div class="section-inner">
+    <div class="section-eyebrow reveal">핵심 발견 · BETA-X</div>
+    <h2 class="section-title reveal">마이크로커널 오버헤드의<br>진짜 정체</h2>
+    <p class="section-desc reveal">3차례 측정 끝에 기존 통념을 뒤집는 발견을 했습니다.</p>
+
+    <div class="discovery-card reveal">
+      <div class="dc-label">BETA-X 결론</div>
+      <div class="dc-claim">
+        오버헤드의 원인은<br>
+        "복사 비용"이 아니라<br>
+        <em>전환 비용</em>이었다
+      </div>
+      <p style="color:var(--muted); font-size:15px; line-height:1.7;">
+        yield를 생략한 atomic 직접 통신 실험에서 <strong style="color:#fff">32배 속도 향상</strong>을 확인.<br>
+        ALPHA 2에서 이미 Zero-copy IPC를 구현해둔 상태였기 때문에,<br>
+        복사 최적화는 큰 데이터에서 오히려 역효과(0.4×)까지 발생.
+      </p>
+      <div class="disc-compare">
+        <div class="disc-box wrong">
+          <div class="tag">❌ 초기 가설</div>
+          <p>"메시지 <strong>복사를 줄이면</strong> (공유 메모리) 빨라질 것"</p>
+        </div>
+        <div class="disc-box right">
+          <div class="tag">✅ 실제 결과</div>
+          <p>"<strong>컨텍스트 스위치를 생략</strong>하면 32배 빨라진다"</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section id="architecture">
+  <div class="section-inner">
+    <div class="section-eyebrow reveal">System Architecture</div>
+    <h2 class="section-title reveal">마이크로커널 설계</h2>
+    <p class="section-desc reveal">커널은 IPC, 메모리, 스케줄러만 담당하고<br>나머지는 모두 유저 공간으로.</p>
+
+    <div class="arch-diagram reveal">
+      <div class="arch-layer">
+        <div class="arch-layer-label">User Space</div>
+        <div>
+          <div class="arch-items">
+            <span class="arch-chip chip-user">Native App</span>
+            <span class="arch-chip chip-user">mushell</span>
+            <span class="arch-chip chip-user">mukg</span>
+            <span class="arch-chip chip-user">GUI Server</span>
+            <span class="arch-chip chip-user">Policy Engine</span>
+          </div>
+          <div class="arch-note" style="margin-top:10px;">자율 최적화의 핵심 — OS 레벨 시점에서만 개입 가능한 정보를 활용</div>
+        </div>
+      </div>
+      <div class="arch-layer">
+        <div class="arch-layer-label">Compat Layer</div>
+        <div>
+          <div class="arch-items">
+            <span class="arch-chip chip-compat">Linux Binary (ELF)</span>
+            <span class="arch-chip chip-compat">syscall ABI → IPC</span>
+            <span class="arch-chip chip-compat">fork / exec / signal</span>
+            <span class="arch-chip chip-compat">POSIX Threading</span>
+          </div>
+          <div class="arch-note" style="margin-top:10px;">목적이 아닌 도구 — Linux 바이너리를 그대로 실행하기 위한 Shim</div>
+        </div>
+      </div>
+      <div class="arch-layer">
+        <div class="arch-layer-label">Drivers</div>
+        <div>
+          <div class="arch-items">
+            <span class="arch-chip chip-compat">ext4 / tmpfs</span>
+            <span class="arch-chip chip-compat">VirtIO Block</span>
+            <span class="arch-chip chip-compat">VirtIO Net</span>
+            <span class="arch-chip chip-compat">TCP/IP Stack</span>
+            <span class="arch-chip chip-compat">Framebuffer</span>
+          </div>
+        </div>
+      </div>
+      <div class="arch-layer" style="background: rgba(74,222,128,0.03);">
+        <div class="arch-layer-label">Microkernel</div>
+        <div>
+          <div class="arch-items">
+            <span class="arch-chip chip-kernel">Scheduler + Policy Engine</span>
+            <span class="arch-chip chip-kernel">Memory Manager</span>
+            <span class="arch-chip chip-kernel">IPC (Zero-copy Capability)</span>
+            <span class="arch-chip chip-kernel">ELF Loader</span>
+          </div>
+          <div class="arch-note" style="margin-top:10px;">최소 권한 원칙 — seL4 Capability 시스템 참조</div>
+        </div>
+      </div>
+      <div class="arch-layer">
+        <div class="arch-layer-label">Hardware</div>
+        <div>
+          <div class="arch-items">
+            <span class="arch-chip chip-hw">x86_64 (QEMU / KVM)</span>
+            <span class="arch-chip chip-hw">Limine UEFI</span>
+            <span class="arch-chip chip-hw">GDT / IDT / PIC</span>
+            <span class="arch-chip chip-hw">Paging</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <table class="compare-table reveal" style="margin-top:48px;">
+      <thead>
+        <tr>
+          <th>구분</th>
+          <th>Linux</th>
+          <th>MuKernel</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>관리 주체</td><td>사용자 (Manual)</td><td><span class="highlight">OS (Autonomous)</span></td></tr>
+        <tr><td>커널 구조</td><td>모놀리식</td><td><span class="highlight">마이크로커널</span></td></tr>
+        <tr><td>설정 방식</td><td>명령형 (sysctl, systemd)</td><td><span class="highlight">선언형 (의도만 설정)</span></td></tr>
+        <tr><td>전력 전략</td><td>데몬 상주</td><td><span class="highlight">이벤트 드리븐</span></td></tr>
+        <tr><td>최적화 주체</td><td>사용자 튜닝</td><td><span class="highlight">Policy Engine</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- POLICY ENGINE -->
+<section id="policy">
+  <div class="section-inner">
+    <div class="section-eyebrow reveal">Policy Engine</div>
+    <h2 class="section-title reveal">OS가 스스로 최적화한다</h2>
+    <p class="section-desc reveal">사용자가 "배터리 절약"이라고 선언하면,<br>OS가 알아서 모든 파라미터를 도출한다.</p>
+
+    <div class="policy-grid">
+      <div class="policy-card reveal">
+        <div class="pc-icon">🧠</div>
+        <div class="pc-title">행동 분류</div>
+        <div class="pc-desc">
+          <code>voluntary_yields</code> / <code>forced_preempts</code>를 PCB에 누적.<br><br>
+          EMA(지수이동평균)로 I/O바운드 vs CPU바운드 실시간 분류.
+        </div>
+      </div>
+      <div class="policy-card reveal">
+        <div class="pc-icon">⌨️</div>
+        <div class="pc-title">포그라운드 부스트</div>
+        <div class="pc-desc">
+          키보드 입력 감지 즉시 포그라운드 프로세스에 High 우선순위 + 슬라이스 부스트.<br><br>
+          타이핑하는 동안 백그라운드 빌드가 체감상 느려지지 않음.
+        </div>
+      </div>
+      <div class="policy-card reveal">
+        <div class="pc-icon">⚖️</div>
+        <div class="pc-title">Starvation 방지</div>
+        <div class="pc-desc">
+          Aging 알고리즘 — 오래 기다린 프로세스의 우선순위를 강제로 올려<br>낮은 우선순위 작업도 결국 실행되도록 보장.
+        </div>
+      </div>
+      <div class="policy-card reveal">
+        <div class="pc-icon">🔌</div>
+        <div class="pc-title">Hardware Fingerprinting</div>
+        <div class="pc-desc">
+          부팅 시 ACPI + PCI 스캔 → P-Core/E-Core 구성 파악.<br>
+          울트라북이면 절전, 데스크탑이면 성능 프로파일 자동 적용. (목표)
+        </div>
+      </div>
+      <div class="policy-card reveal">
+        <div class="pc-icon">⚡</div>
+        <div class="pc-title">Fast Channel (다음 단계)</div>
+        <div class="pc-desc">
+          BETA-X에서 발견한 32배 효과를 구현.<br>
+          "생성은 엄격하게, 사용은 가볍게" — Capability 검증 우회 없이 전환 비용만 제거.
+        </div>
+      </div>
+      <div class="policy-card reveal">
+        <div class="pc-icon">📊</div>
+        <div class="pc-title">ML 로드맵</div>
+        <div class="pc-desc">
+          EMA(완료) → Bayesian → LightGBM 순서로 점진적 고도화.<br>
+          규칙 기반에서 학습 기반으로.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PROGRESS -->
+<section id="progress">
+  <div class="section-inner">
+    <div class="section-eyebrow reveal">개발 현황</div>
+    <h2 class="section-title reveal">구현 완료된 것들</h2>
+
+    <div class="progress-list reveal">
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>부팅</strong><small>Limine UEFI + 시리얼 출력</small></div>
+        <span class="pi-badge badge-alpha">Alpha 1</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>GDT / IDT / PIC</strong><small>인터럽트 처리</small></div>
+        <span class="pi-badge badge-alpha">Alpha</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>페이징 + Ring3 유저스페이스</strong></div>
+        <span class="pi-badge badge-alpha">Alpha</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>선점형 스케줄러</strong><small>Policy Engine 연동, EMA 분류, Aging</small></div>
+        <span class="pi-badge badge-alpha">Alpha</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>IPC</strong><small>Zero-copy Capability 기반</small></div>
+        <span class="pi-badge badge-alpha">Alpha 2</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>파일시스템</strong><small>ext4 디스크 이미지, tmpfs</small></div>
+        <span class="pi-badge badge-beta">Beta</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>VirtIO Block/Net + TCP/IP 스택</strong></div>
+        <span class="pi-badge badge-beta">Beta</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>Linux syscall 호환</strong><small>Tier 1 + fork/exec/signal/threading</small></div>
+        <span class="pi-badge badge-beta">Beta</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>ELF Loader / mushell / mukg</strong><small>Shell + 패키지 관리자</small></div>
+        <span class="pi-badge badge-beta">Beta</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>GUI</strong><small>Framebuffer, 마우스/키보드</small></div>
+        <span class="pi-badge badge-beta">Beta</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-done">✓</div>
+        <div class="pi-text"><strong>동적 IPC 최적화</strong><small>런타임 관찰 → 자동 fast path · 전환 비용이 핵심임 발견</small></div>
+        <span class="pi-badge badge-betax">Beta-X</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-wip">⬡</div>
+        <div class="pi-text"><strong>Fast Channel 재설계</strong><small>yield 없는 atomic 직접 통신 · 32배 효과 구현</small></div>
+        <span class="pi-badge badge-betax">Next</span>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-todo">○</div>
+        <div class="pi-text"><strong>Policy Engine 확장</strong><small>메모리/전력 정책까지</small></div>
+      </div>
+      <div class="progress-item">
+        <div class="pi-status pi-todo">○</div>
+        <div class="pi-text"><strong>ML 고도화</strong><small>EMA → Bayesian → LightGBM</small></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- STACK -->
+<section id="stack">
+  <div class="section-inner">
+    <div class="section-eyebrow reveal">기술 스택</div>
+    <h2 class="section-title reveal">Rust로 처음부터</h2>
+    <p class="section-desc reveal"><code style="background:rgba(255,255,255,0.08);padding:2px 8px;border-radius:4px;font-family:'SF Mono',monospace;">#![no_std]</code> — 표준 라이브러리 없이, 하드웨어 위에서 직접.</p>
+
+    <div class="stack-grid reveal">
+      <div class="stack-card">
+        <div class="sc-name rust">Rust</div>
+        <div class="sc-role">Nightly · #![no_std]<br>메모리 안전성을 컴파일타임에</div>
+      </div>
+      <div class="stack-card">
+        <div class="sc-name limine">Limine</div>
+        <div class="sc-role">UEFI 부트로더<br>Rust 생태계 친화적, GRUB 대체</div>
+      </div>
+      <div class="stack-card">
+        <div class="sc-name qemu">QEMU</div>
+        <div class="sc-role">x86_64 에뮬레이션<br>KVM 가속 · Apple Silicon 크로스컴파일</div>
+      </div>
+    </div>
+
+    <div style="margin-top:32px; background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:16px; padding:28px 32px;">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:16px;letter-spacing:.06em;text-transform:uppercase;font-weight:600;">빌드 & 실행</div>
+      <pre style="font-family:'SF Mono','Fira Code',monospace; font-size:13px; color:#86efac; line-height:2; overflow-x:auto;">make setup    <span style="color:var(--muted)"># 환경 설정</span>
+make run      <span style="color:var(--muted)"># 빌드 + QEMU 시리얼 콘솔</span>
+make run-gui  <span style="color:var(--muted)"># 빌드 + QEMU GUI + VirtIO</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="dev-note">
+    <strong>중학교 1학년</strong>이 만들고 있는 OS.<br>
+    목표: 대학 졸업 전 완성.
+  </div>
+  <p>MuKernel · Rust · x86_64 · Microkernel · Autonomous</p>
+  <p style="margin-top:8px; color:#3a3a3c;">참고: Redox OS · seL4</p>
+</footer>
+
+<script>
+  const observer = new IntersectionObserver(
+    entries => entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); }),
+    { threshold: 0.12 }
+  );
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+</script>
+</body>
+</html>

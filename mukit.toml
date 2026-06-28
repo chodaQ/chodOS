@@ -1,0 +1,5 @@
+title = "MuKernel OS"
+tagline = "A microkernel operating system written in Rust, from scratch."
+badge = "v0.1 Alpha"
+color = "#a78bfa"
+landing = "muOS_landing.html"
