@@ -2,10 +2,12 @@
 
 > "아치 리눅스의 자유도 + macOS의 편안함"을 목표로 하는 Rust 기반 마이크로커널 OS
 
-**현재 단계: ALPHA 1~17 완료 → BETA 1~15 완료 → BETA-X(동적 IPC 최적화) 진행 중**
+**현재 단계: ALPHA 1~17 완료 → BETA 1~15 완료 → BETA-X(동적 IPC 최적화) 완료**
 부팅 → 메모리 → 스케줄러 → IPC → ext4 → TCP/IP → Linux syscall → ELF 실행 →
 Shell → GUI → fork/exec/시그널/스레딩까지 end-to-end 동작 확인됨.
-자세한 마일스톤은 `ARCHITECTURE.md` 참고.
+BETA-X에서 밝혀진 핵심 발견: 마이크로커널 오버헤드의 진짜 정체는 "메시지
+복사 비용"이 아니라 "전환(컨텍스트 스위치) 비용"이었다 — 자세한 내용은
+`ARCHITECTURE.md` 참고.
 
 ---
 
@@ -115,13 +117,27 @@ Policy Engine을 "그냥 유저 공간 데몬으로 만들면 되지 않나"라�
 ✅ 컨텍스트 스위치 시점 개입 (지금 구현된 부분)
 ✅ 인터럽트 핸들러 레이턴시 활용 (키보드 부스트)
 ⬜ 페이지 폴트 시점 개입 (메모리 정책)
-⬜ IPC 통신 빈도 관찰 → 동적 fast path 생성 (ARCHITECTURE.md BETA-X 참고)
+✅ IPC 통신 빈도 관찰 → 동적 fast path 생성 — 완료, 단 핵심 발견은
+   예상과 달랐음 (아래 참고)
 ```
 
-마지막 항목(동적 IPC 최적화)은 학계 선례 조사 결과 "정적으로 미리 정한 fast
-path"는 있어도(seL4, dIPC, SkyBridge) "런타임에 통신 빈도를 관찰해서 자동으로
-fast path를 만드는" 사례는 발견되지 않은, 비어있는 자리다. 자세한 내용은
-`ARCHITECTURE.md`의 BETA-X 섹션 참고.
+동적 IPC 최적화(BETA-X)는 "런타임에 통신 빈도를 관찰해서 자동으로 fast
+path를 만드는" 시스템 자체는 끝까지 동작시켰다(학계 선례 조사 결과 정적
+방식만 있고 이런 동적 방식은 발견되지 않았던 빈자리). 그런데 3차례 측정
+끝에 드러난 진짜 교훈은 다른 데 있었다:
+
+```
+처음 가정: "메시지 복사를 줄이면(공유 메모리) 빨라질 것"
+실제 결과: 거의 효과 없거나 역효과 (큰 데이터일수록 더 느림, 최대 0.4×)
+           — ALPHA 2(Zero-copy IPC)가 이미 복사 문제를 다뤄둔 상태였기 때문
+
+뒤늦게 발견한 것: "전환(컨텍스트 스위치/스케줄러 경유)을 생략하면
+                  32배 빨라진다" (yield 없는 atomic 직접 통신 실험)
+```
+
+즉 마이크로커널 오버헤드의 진짜 정체는 "복사 비용"이 아니라 "전환 비용"
+이었다. 이 발견과 측정 전체 과정은 `ARCHITECTURE.md`의 BETA-X 섹션에
+숨김없이 기록되어 있다.
 
 ---
 
@@ -161,11 +177,12 @@ fast path를 만드는" 사례는 발견되지 않은, 비어있는 자리다. �
 ✅ Linux syscall 호환 (Tier 1 + fork/exec/signal/threading)
 ✅ ELF Loader, Shell(mushell), 패키지 관리자(mukg)
 ✅ GUI (framebuffer, 마우스/키보드 입력)
-🔄 동적 IPC 최적화 (BETA-X) — 현재 진행 중, Policy Engine 핵심 확장
+✅ 동적 IPC 최적화 (BETA-X) — 완료. 핵심 발견: 전환 비용이 복사 비용보다 컸음
+⬜ fast channel 재설계 — yield 없는 atomic 직접 통신 방식으로 (32배 효과 반영)
 ⬜ Policy Engine 본격 확장 (메모리/전력까지)
 ⬜ Linux/Arch 완전 호환 (BETA 16~28, 보류 중 — pacman 실행이 최종 목표지만
-   BETA-X보다 우선순위 낮춤)
-⬜ ML (BETA-X 이후, 규칙 기반 → EMA는 이미 완료, Bayesian → LightGBM 순서)
+   우선순위 낮춤)
+⬜ ML (규칙 기반 → EMA는 이미 완료, Bayesian → LightGBM 순서)
 ```
 
 상세 마일스톤, 각 단계의 구현 디테일, BETA-X(동적 IPC 최적화)의 기술적 배경은

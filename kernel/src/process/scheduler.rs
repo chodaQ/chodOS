@@ -136,6 +136,13 @@ impl Scheduler {
         }
     }
 
+    pub fn get_priority(&self, pid: Pid) -> Priority {
+        for p in self.processes.iter() {
+            if p.pid == pid { return p.priority; }
+        }
+        Priority::Normal
+    }
+
     /// 특정 PID의 선호 CPU를 설정 (BETA-X 5 core affinity).
     pub fn set_preferred_cpu(&mut self, pid: Pid, cpu: u8) {
         for p in self.processes.iter_mut() {
@@ -267,7 +274,7 @@ impl Scheduler {
         // BETA-X 1: 송신 카운터 갱신 → Policy Engine에 이벤트 알림
         let from = self.processes[self.current].pid;
         let count = self.processes[self.current].record_ipc_send(to);
-        crate::policy::observe_ipc(from, to, count);
+        crate::policy::observe_ipc(from, to, count, msg.len as u64);
 
         for proc in self.processes.iter_mut() {
             if proc.pid == to {
@@ -323,6 +330,11 @@ pub fn keyboard_boost() {
 /// 우선순위 설정 (Policy Engine에서 호출, ALPHA 5)
 pub fn set_priority(pid: Pid, pri: Priority) {
     unsafe { get().set_priority(pid, pri); }
+}
+
+/// PID의 현재 우선순위 반환 (없으면 Normal).
+pub fn get_priority(pid: Pid) -> Priority {
+    unsafe { get().get_priority(pid) }
 }
 
 /// 선호 CPU 설정 (BETA-X 5 core affinity)

@@ -56,32 +56,24 @@ static AP_STACKS: [ApStack; MAX_CPUS] = [const { ApStack([0u8; AP_STACK_SIZE]) }
 unsafe extern "C" fn ap_entry(info: &MpInfo) -> ! {
     let ap_idx = info.extra_argument() as usize;
 
-    // 정적 스택으로 RSP 전환 (Limine 제공 임시 스택 대신)
-    let stack_top = AP_STACKS[ap_idx].0.as_ptr().add(AP_STACK_SIZE) as u64;
-    core::arch::asm!(
-        "mov rsp, {rsp}",
-        "push 0",          // 16-byte alignment: ret addr placeholder
-        rsp = in(reg) stack_top,
-        options(nostack),
-    );
+    // ap_init(GDT/IDT/STI)을 호출하지 않는다.
+    // 이유: Q35 I/O APIC가 timer IRQ를 AP에 배달 → timer handler가
+    // serial_println 호출 → QEMU MTTCG BQL 경합 → THRE 고착 → hang.
+    // Limine이 AP를 Long Mode + 커널 페이지 테이블로 부팅하므로
+    // 인터럽트 없이도 atomic 연산과 메모리 접근은 정상 동작한다.
 
-    // GDT/IDT 로드 + STI (BSP가 초기화한 테이블 재사용)
-    crate::interrupts::ap_init();
-
-    // AP 온라인 등록
-    // serial_println은 여기서 호출하지 않음:
-    // BSP와 동시에 serial 출력 시 QEMU BQL 경합으로 THRE가 영원히
-    // set되지 않아 wait_for_empty_transmit()이 무한 스핀한다.
-    // BSP가 AP_ONLINE 카운터와 타임아웃으로 AP 상태를 확인한다.
     AP_ONLINE.fetch_add(1, Ordering::SeqCst);
 
-    // A-2: HLT 먼저 → 인터럽트 발생 시 깨어나서 work 슬롯 확인
-    loop {
-        core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
-        let fn_ptr = AP_WORK_FN[ap_idx].load(Ordering::Acquire);
-        if fn_ptr != 0 {
-            let f: unsafe fn() -> ! = core::mem::transmute(fn_ptr);
-            f();
+    if ap_idx == 0 {
+        // AP #0: Phase A sender — A2_PONG=1 신호를 기다렸다 N번 ping 전송.
+        // 스택은 Limine 임시 스택 사용 (bench_a2::ap_sender_phase_a는 재귀 없음).
+        crate::bench_a2::ap_sender_phase_a()
+    } else {
+        // AP #1, #2: 아무 일도 안 함.
+        // STI 없이 HLT = NMI/INIT을 제외한 인터럽트로 깨어나지 않음.
+        // QEMU vCPU 스레드가 잠들어 BSP 성능에 영향 없음.
+        loop {
+            core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
         }
     }
 }
@@ -220,6 +212,7 @@ pub fn pin_pair(from: Pid, to: Pid) {
 
     pin_to_cpu(from, target);
     pin_to_cpu(to, target);
+    crate::tracer::pin_pair_event(from as u32, to as u32, target);
 
     crate::serial_println!(
         "[affinity] hot pair pid{}↔pid{} → core{} (캐시 재사용 최적화)",

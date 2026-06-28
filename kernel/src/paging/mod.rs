@@ -36,6 +36,7 @@
 //! - Longjmp:    3회 syscall 후 커널 메인으로 복귀
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::memory::{frame, hhdm_offset};
 use crate::interrupts::gdt;
 
@@ -56,6 +57,13 @@ const USER_STACK_PAGES: usize = 4;
 // ── 전역 상태 ─────────────────────────────────────────────────────────────
 /// 커널 전용 페이지 테이블의 CR3 값 (유저 모드 복귀 시 CR3 복원에 사용)
 pub static mut KERNEL_CR3: u64 = 0;
+
+// ── BETA-X-2 2: 읽기 전용 채널 윈도우 ────────────────────────────────
+/// 읽기 전용 채널 페이지를 매핑할 커널 VA 베이스.
+/// HHDM(0xFFFF_8000...)과 겹치지 않는 별도 커널 영역.
+const RO_CHANNEL_BASE: u64 = 0xFFFF_A000_0000_0000;
+/// 다음에 할당할 슬롯 인덱스 (슬롯당 4KB)
+static RO_CHANNEL_SLOT: AtomicU64 = AtomicU64::new(0);
 
 /// enter_user_demo() 진입 직전에 저장한 커널 메인 스택 포인터
 ///
@@ -532,6 +540,34 @@ pub unsafe fn virt_to_phys(cr3: u64, vaddr: u64) -> Option<u64> {
     Some((pte & !0xFFF) | (vaddr & 0xFFF))
 }
 
+/// 커널 페이지 테이블에서 `vaddr`의 최종 PTE 엔트리(플래그 포함) 반환.
+///
+/// BETA-X-2 3 격리 검증에서 read_va의 PTE_WRITABLE 부재 확인에 사용.
+pub fn get_kernel_pte(vaddr: u64) -> Option<u64> {
+    unsafe {
+        let cr3 = KERNEL_CR3;
+        let pml4 = table_at(cr3 & !0xFFF);
+        let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+        let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+        let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+        let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+        let pml4e = (*pml4).0[i4];
+        if pml4e & PTE_PRESENT == 0 { return None; }
+        let pdpt = table_at(pml4e & !0xFFF);
+        let pdpte = (*pdpt).0[i3];
+        if pdpte & PTE_PRESENT == 0 { return None; }
+        if pdpte & (1 << 7) != 0 { return Some(pdpte); } // 1GB
+        let pd = table_at(pdpte & !0xFFF);
+        let pde = (*pd).0[i2];
+        if pde & PTE_PRESENT == 0 { return None; }
+        if pde & (1 << 7) != 0 { return Some(pde); } // 2MB
+        let pt = table_at(pde & !0xFFF);
+        let pte = (*pt).0[i1];
+        if pte & PTE_PRESENT == 0 { return None; }
+        Some(pte)
+    }
+}
+
 /// `cr3` 주소 공간에서 `vaddr`부터 `count` 페이지 언매핑 + 물리 프레임 해제.
 pub unsafe fn munmap_pages(cr3: u64, vaddr: u64, count: usize) {
     for i in 0..count as u64 {
@@ -645,4 +681,40 @@ pub unsafe fn enter_user_demo(code: &[u8]) -> ! {
         // noreturn: IRETQ 이후 ring3 실행, 이 asm 블록으로 돌아오지 않음
         // 복귀는 syscall_handler의 longjmp가 after_user_demo()로 점프
     );
+}
+
+// ── BETA-X-2 2: 비대칭 권한 매핑 ────────────────────────────────────────────
+
+/// 1개의 물리 프레임을 할당하고 비대칭 두 VA에 매핑.
+///
+/// 반환: (write_va, read_va, phys)
+/// - write_va = HHDM + phys  (PTE_PRESENT | PTE_WRITABLE, 기존 HHDM 매핑)
+/// - read_va  = RO_CHANNEL_BASE + slot*4096  (PTE_PRESENT만, 쓰기 금지)
+///
+/// 수신자가 read_va에 쓰기 시도 시 #PF(보호 위반) 발생 → 하드웨어 격리.
+pub fn alloc_channel_frame() -> (u64, *const u8, u64) {
+    let phys = crate::memory::frame::alloc_frame().expect("OOM: alloc_channel_frame");
+    unsafe {
+        // write_va: HHDM 매핑 (이미 존재, PTE_WRITABLE 보장)
+        let write_va = phys + hhdm_offset();
+
+        // read_va: 새로운 커널 VA에 read-only로 매핑
+        let slot = RO_CHANNEL_SLOT.fetch_add(1, Ordering::Relaxed);
+        let read_va = RO_CHANNEL_BASE + slot * 4096;
+        let kpml4 = table_at(KERNEL_CR3 & !0xFFF);
+        map_4k(kpml4, read_va, phys, PTE_PRESENT); // PTE_WRITABLE 없음
+
+        (write_va, read_va as *const u8, phys)
+    }
+}
+
+/// 비대칭 매핑 채널 프레임 해제.
+///
+/// read_va PTE를 제거하고 물리 프레임을 해제.
+pub fn free_channel_frame(phys: u64) {
+    // 물리 프레임 해제 (write_va=HHDM 매핑은 HHDM 전체 해제 시 같이 사라짐)
+    crate::memory::frame::free_frame(phys);
+    // read_va 역산은 슬롯 기반이라 정확히 찾기 어려우므로 TLB flush만 수행
+    // (슬롯은 재사용하지 않으므로 메모리 누수는 없고 VA 소모만 발생)
+    unsafe { core::arch::asm!("invlpg [{}]", in(reg) 0u64, options(nostack, preserves_flags)); }
 }

@@ -27,7 +27,6 @@
 //! SharedBuffer도 함께 해제됨.
 
 use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use spin::Mutex;
 
 use super::Pid;
@@ -54,12 +53,29 @@ pub fn ensure_channel_cap(from: Pid, to: Pid, capacity: usize) -> CapId {
             return cap_id;
         }
     }
-    let cap_id = ipc_cap::alloc_shared(from, Vec::with_capacity(capacity));
+    // BETA-X-2 2: 비대칭 권한 매핑 (frame_backed=true)
+    // write_va(HHDM) = 쓰기 가능, read_va(RO_CHANNEL_BASE) = 읽기 전용
+    let cap_id = ipc_cap::alloc_shared_frame(from, capacity);
     FAST_CHANNELS.lock().insert((from, to), cap_id);
-    crate::serial_println!(
-        "[ipc-X] fast channel 생성: pid{}→pid{} cap={}  (버퍼 {}B 예약)",
-        from, to, cap_id, capacity,
-    );
+    crate::tracer::channel_created(from as u32, to as u32, cap_id as u32, capacity);
+
+    // BETA-X-2 3: 격리 검증 — read_va PTE_WRITABLE 없음 + write→read 왕복 확인
+    let iso = ipc_cap::verify_channel_isolation(cap_id);
+    match iso {
+        ipc_cap::IsolationResult::Ok => {
+            crate::serial_println!(
+                "[ipc-X] fast channel 생성: pid{}→pid{} cap={}  (비대칭매핑 {}B, W:HHDM R:RO_WIN) ✓ 격리검증 OK",
+                from, to, cap_id, capacity,
+            );
+        }
+        other => {
+            crate::tracer::anomaly(from as u32, to as u32, cap_id as u32, other as u64);
+            crate::serial_println!(
+                "[ipc-X] !! 격리검증 실패: pid{}→pid{} cap={} result={:?}",
+                from, to, cap_id, other,
+            );
+        }
+    }
     cap_id
 }
 
@@ -83,6 +99,7 @@ pub fn write_fast(cap_id: CapId, data: &[u8]) -> bool {
 pub fn drop_channel(from: Pid, to: Pid) {
     if let Some(cap_id) = FAST_CHANNELS.lock().remove(&(from, to)) {
         ipc_cap::drop_shared(cap_id);
+        crate::tracer::channel_dropped(from as u32, to as u32, cap_id as u32, 0);
         crate::serial_println!(
             "[ipc-X] fast channel 회수: pid{}→pid{} cap={}",
             from, to, cap_id,

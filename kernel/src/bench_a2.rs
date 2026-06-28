@@ -70,22 +70,25 @@ fn rdtsc() -> u64 {
 ///
 /// 반환하지 않음 (-> !). `smp::assign_ap_work(0, ap_sender_phase_a)` 로 호출.
 pub unsafe fn ap_sender_phase_a() -> ! {
-    crate::serial_println!("[a2] AP1 sender 시작 (Phase A)");
+    // serial_println 호출 금지: AP에서 QEMU UART 접근 시 BQL 경합 → BSP hang.
+    // A2_DONE=1이 될 때까지(BSP가 Phase A 초기화 완료) 대기.
+    while A2_DONE.load(Ordering::Acquire) < 1 {
+        core::arch::asm!("pause", options(nomem, nostack, preserves_flags));
+    }
 
     for _ in 0..N {
         // receiver가 ready 신호(pong=1)를 올릴 때까지 대기
         while A2_PONG.load(Ordering::Acquire) == 0 {
-            unsafe { core::arch::asm!("pause", options(nomem, nostack, preserves_flags)); }
+            core::arch::asm!("pause", options(nomem, nostack, preserves_flags));
         }
-        A2_PONG.store(0, Ordering::Relaxed); // pong 소비
+        A2_PONG.store(0, Ordering::Relaxed);
         let t0 = rdtsc();
-        A2_PING.store(t0, Ordering::Release); // ping 발사
+        A2_PING.store(t0, Ordering::Release);
     }
 
-    crate::serial_println!("[a2] AP1 sender Phase A 완료");
-    // idle — BSP가 Phase A 수집 완료 후 A2_DONE=2 설정
+    // Phase A 완료 — BSP가 A2_DONE=2를 설정할 것임. 이후 pause 루프.
     loop {
-        unsafe { core::arch::asm!("pause", options(nomem, nostack, preserves_flags)); }
+        core::arch::asm!("pause", options(nomem, nostack, preserves_flags));
     }
 }
 
@@ -110,8 +113,9 @@ pub fn bsp_receiver_phase_a() {
                 A2_IDX_A.fetch_add(1, Ordering::Relaxed);
                 break;
             }
-            // hlt: AP1에게 QEMU 실행 기회를 양보 (pause spin은 AP1을 굶김)
-            unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+            // pause spin: QEMU MTTCG에서 BSP와 AP #0이 별도 스레드로 동시 실행되므로
+            // HLT 불필요. pause로 스핀하면 수 µs 내에 ping 감지 가능.
+            unsafe { core::arch::asm!("pause", options(nomem, nostack, preserves_flags)); }
         }
     }
 

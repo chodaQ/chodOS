@@ -1,5 +1,5 @@
 //! 커널 진입점 (Kernel Entry Point)
-//!
+//
 //! ## 부팅 순서 (Milestone ALPHA)
 //! 1. limine 부트로더 → _start() 호출
 //! 2. 시리얼 포트 초기화
@@ -20,6 +20,7 @@
 
 extern crate alloc;
 
+mod tracer;        // BETA-X-2 1: Event Tracer — 자율 결정 블랙박스
 mod bench_a1;     // BETA-X 검증 A-1: 페이로드 크기 스윕
 mod bench_a2;     // BETA-X 검증 A-2: -smp 4 멀티코어 레이턴시 비교
 mod bench_ipc;    // BETA-X 7: IPC 레이턴시 A/B 벤치마크
@@ -34,7 +35,7 @@ mod mouse;
 mod memory;
 mod pkg;
 mod net;
-mod paging;
+pub mod paging;
 mod pci;
 mod policy;
 mod process;
@@ -955,10 +956,10 @@ pub extern "C" fn _start() -> ! {
         process::Process::new(a1_send, "a1_send", bench_a1::a1_sender_task)
     );
 
-    // 완료 대기 (크기 5개 × 64회 샘플 → 시간 소요)
+    // 완료 대기 (크기 4개 × 2페이즈 × 32샘플 = 256)
     loop {
         if bench_a1::A1_DONE.load(Ordering::Relaxed) == 1
-            && bench_a1::A1_IDX.load(Ordering::Relaxed) >= bench_a1::N_PER * 10
+            && bench_a1::A1_IDX.load(Ordering::Relaxed) >= bench_a1::N_PER * 8
         {
             break;
         }
@@ -980,13 +981,12 @@ pub extern "C" fn _start() -> ! {
     serial_println!("===========================================");
 
     if smp::ap_count() >= 1 {
-        // Phase A: AP1에 sender 할당, BSP가 receiver 직접 실행
+        // Phase A: AP #0은 bootstrap 시점부터 ap_sender_phase_a()를 실행 중.
+        // assign_ap_work 불필요 — BSP가 receiver로 진입하면 A2_PONG=1로 시작 신호.
         bench_a2::A2_PING.store(0, Ordering::Relaxed);
         bench_a2::A2_PONG.store(0, Ordering::Relaxed);
         bench_a2::A2_IDX_A.store(0, Ordering::Relaxed);
         bench_a2::A2_DONE.store(1, Ordering::Relaxed);
-
-        smp::assign_ap_work(0, bench_a2::ap_sender_phase_a);
 
         // BSP가 receiver로 동작 (블로킹 루프, AP1 ping 대기)
         bench_a2::bsp_receiver_phase_a();
@@ -1024,6 +1024,8 @@ pub extern "C" fn _start() -> ! {
         serial_println!("[a2] AP 없음 (단일코어 모드) — A-2 건너뜀");
         serial_println!("[a2] QEMU 실행 시 -smp 4 옵션 확인 (Makefile에 이미 포함)");
     }
+    // ── BETA-X-2 1: Event Tracer dump ────────────────────────────────────────
+    tracer::dump();
     serial_println!("--- BETA-X A-2 complete ---\n");
 
     // ── ALPHA 13 → 14 연속 데모 ──────────────────────────────────────────────

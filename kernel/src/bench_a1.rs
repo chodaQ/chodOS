@@ -2,23 +2,28 @@
 //!
 //! ## 목적
 //!
-//! BETA-X 7에서 fast channel이 0.9× 느렸던 원인이 "64B 페이로드가 너무 작아서"인지 검증.
-//! 64B → 128B → 256B → 512B → 1024B 순으로 동일한 측정을 반복하고
-//! 어느 크기에서 fast channel이 일반 IPC를 역전하는지 찾는다.
+//! 같은 yield_now() 구조에서, 페이로드가 클수록 fast channel이 유리해지는
+//! 기준점(crossover)을 찾는다.
+//! 64B → 256B → 1024B → 4096B 순으로 일반 IPC vs fast channel을 측정.
 //!
-//! ## 핵심 차이 (128B 이상)
+//! ## 핵심 차이 (64B 초과)
 //!
 //! ```text
 //! 일반 IPC:    data[..64] 만 복사 → Message.data (truncation, 데이터 손실)
 //! fast channel: 전체 data 를 SharedBuffer에 write → recv()가 투명하게 읽음
 //! ```
 //!
-//! 즉, 128B 이상에서는 레이턴시 비교뿐 아니라 **정확성(correctness)** 차이도 존재.
+//! send() 비용:
+//!   - 일반 IPC:    항상 64B copy (크기 무관)
+//!   - fast channel: N bytes copy to SharedBuffer (크기에 비례)
+//!
+//! 즉, 크기가 클수록 fast channel의 SharedBuffer write 비용이 증가한다.
+//! 반면 일반 IPC는 항상 64B 고정이지만 데이터를 잃는다.
 //!
 //! ## 샘플 배열 레이아웃
 //!
 //! ```text
-//! SWEEP_SIZES = [64, 128, 256, 512, 1024]  (N_SIZES = 5)
+//! SWEEP_SIZES = [64, 256, 1024, 4096]  (N_SIZES = 4)
 //! 크기별 N_PER 샘플 × Phase 2(A/B) = 총 N_SIZES × 2 × N_PER 개
 //!
 //! idx = size_i * 2 * N_PER  +  phase * N_PER  +  sample_i
@@ -31,11 +36,11 @@ use crate::process;
 
 // ── 설정 ─────────────────────────────────────────────────────────────────────
 
-pub const SWEEP_SIZES: [usize; 5] = [64, 128, 256, 512, 1024];
-const N_SIZES: usize = 5;
+pub const SWEEP_SIZES: [usize; 4] = [64, 256, 1024, 4096];
+const N_SIZES: usize = 4;
 pub const N_PER: usize = 32; // 크기별 샘플 수 (부팅 시간 ↔ 통계 정확도 균형)
 
-const TOTAL: usize = N_SIZES * 2 * N_PER; // 5 × 2 × 32 = 320
+const TOTAL: usize = N_SIZES * 2 * N_PER; // 4 × 2 × 32 = 256
 
 // ── 공유 상태 ─────────────────────────────────────────────────────────────────
 
@@ -94,8 +99,8 @@ pub fn a1_sender_task() -> ! {
     };
     let my_pid = process::scheduler::current_pid();
 
-    // 최대 페이로드 크기 (1024B) 스택 버퍼 — 실제 전송은 size 바이트만 사용
-    let payload = [0xAAu8; 1024];
+    // 최대 페이로드 크기 (4096B) 스택 버퍼 — 실제 전송은 size 바이트만 사용
+    let payload = [0xAAu8; 4096];
 
     for (si, &size) in SWEEP_SIZES.iter().enumerate() {
         let base = si * 2 * N_PER;
@@ -156,35 +161,36 @@ pub fn report() {
         "[a1] ══════════════════════════════════════════════════════════"
     );
     crate::serial_println!(
-        "[a1]   BETA-X A-1: 페이로드 크기별 IPC 레이턴시 비교 (n={})",
-        N_PER,
+        "[a1]   BETA-X A-1: 페이로드 크기별 IPC 레이턴시 비교 (n={})", N_PER,
     );
     crate::serial_println!(
-        "[a1]   일반 IPC: 64B 초과 truncation  │  fast channel: 전체 전달"
+        "[a1]   일반 IPC: 항상 64B 복사(초과 truncation) │ fast: N바이트 SharedBuffer write"
+    );
+    crate::serial_println!(
+        "[a1]   yield_now() 구조 동일 — 순수 데이터 경로 차이만 비교"
     );
     crate::serial_println!(
         "[a1] ──────────────────────────────────────────────────────────"
     );
     crate::serial_println!(
-        "[a1]  {:>6}  {:>10}  {:>10}  {:>6}  {:>10}  {:>10}",
-        "size", "avg_A(cy)", "avg_B(cy)", "ratio", "A전달", "B전달",
+        "[a1]  {:>6}  {:>10}  {:>10}  {:>5}  {:>8}  {:>8}",
+        "size", "일반IPC(cy)", "fast(cy)", "ratio", "일반전달", "fast전달",
     );
     crate::serial_println!(
         "[a1] ──────────────────────────────────────────────────────────"
     );
 
     let mut first_win: Option<usize> = None;
+    let mut last_base_for_eff = 0usize; // 1024B 기준 효율 계산용
 
     for (si, &size) in SWEEP_SIZES.iter().enumerate() {
         let base = si * 2 * N_PER;
 
-        // 이상치 제거: 상위 4개(12.5%) 폐기 후 나머지 평균
         let avg_a = trimmed_avg(&A1_LATS[base..base + N_PER]);
         let avg_b = trimmed_avg(&A1_LATS[base + N_PER..base + 2 * N_PER]);
 
         let ratio_x10 = if avg_b > 0 { avg_a * 10 / avg_b } else { 10 };
         let delivered_a = size.min(64);
-        let delivered_b = size;
 
         let win = ratio_x10 >= 10;
         if win && first_win.is_none() { first_win = Some(size); }
@@ -194,8 +200,10 @@ pub fn report() {
             "[a1]  {:>5}B  {:>10}  {:>10}  {}.{}×{}  {:>6}B  {:>6}B",
             size, avg_a, avg_b,
             ratio_x10 / 10, ratio_x10 % 10, mark,
-            delivered_a, delivered_b,
+            delivered_a, size,
         );
+
+        if size == 1024 { last_base_for_eff = base; }
     }
 
     crate::serial_println!(
@@ -203,23 +211,24 @@ pub fn report() {
     );
     match first_win {
         Some(sz) => crate::serial_println!(
-            "[a1]  ✓ 역전점: {}B 이상에서 fast channel이 일반 IPC보다 빠름",
-            sz,
+            "[a1]  ✓ crossover: {}B 이상에서 fast channel이 일반 IPC보다 빠름", sz,
         ),
         None => crate::serial_println!(
-            "[a1]  전 구간에서 fast channel이 일반 IPC보다 느림"
+            "[a1]  전 구간에서 fast channel이 일반 IPC보다 느림 (yield 오버헤드 지배)"
         ),
     }
     crate::serial_println!(
-        "[a1]  ※ 128B 이상: 일반 IPC는 64B만 전달 → fast는 정확성에서도 우위"
+        "[a1]  ※ 일반 IPC는 64B 초과 데이터 유실 → 정확성은 fast가 항상 우위"
     );
-    crate::serial_println!(
-        "[a1]  효율(bytes/cycle): A={} vs B={} (512B 기준)",
-        if { let a = trimmed_avg(&A1_LATS[3*2*N_PER..3*2*N_PER+N_PER]); if a>0{512/a}else{0} } > 0
-            { 512 / trimmed_avg(&A1_LATS[3*2*N_PER..3*2*N_PER+N_PER]).max(1) } else { 0 },
-        if { let b = trimmed_avg(&A1_LATS[3*2*N_PER+N_PER..3*2*N_PER+2*N_PER]); if b>0{512/b}else{0} } > 0
-            { 512 / trimmed_avg(&A1_LATS[3*2*N_PER+N_PER..3*2*N_PER+2*N_PER]).max(1) } else { 0 },
-    );
+    // 1024B 기준 처리량(bytes/cycle)
+    if last_base_for_eff > 0 {
+        let a1k = trimmed_avg(&A1_LATS[last_base_for_eff..last_base_for_eff + N_PER]).max(1);
+        let b1k = trimmed_avg(&A1_LATS[last_base_for_eff + N_PER..last_base_for_eff + 2 * N_PER]).max(1);
+        crate::serial_println!(
+            "[a1]  처리량(1024B 기준): 일반={} B/cy  fast={} B/cy",
+            64 / a1k, 1024 / b1k,
+        );
+    }
     crate::serial_println!(
         "[a1] ══════════════════════════════════════════════════════════"
     );

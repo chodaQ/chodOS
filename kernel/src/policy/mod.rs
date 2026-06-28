@@ -70,11 +70,22 @@ struct IpcEntry {
     last_count: u64,
     /// BETA-X 6: 연속 cold 창 수 (이 횟수가 DECAY_COLD_WINDOWS 이상이면 채널 회수)
     cold_windows: u8,
+    // ── BETA-X-2 4: 이상 탐지 ─────────────────────────────────────────────
+    /// 창당 메시지 수 EMA (×10 고정소수점, α=0.3)
+    rate_ema: u64,
+    /// 현재 창에서 수신된 총 페이로드 바이트 (창 시작마다 0 리셋)
+    payload_bytes_window: u64,
+    /// 창당 페이로드 바이트 EMA (×10 고정소수점, α=0.3)
+    payload_ema: u64,
 }
 
 impl IpcEntry {
     const fn empty() -> Self {
-        IpcEntry { from: 0, to: 0, count: 0, active: false, last_count: 0, cold_windows: 0 }
+        IpcEntry {
+            from: 0, to: 0, count: 0, active: false,
+            last_count: 0, cold_windows: 0,
+            rate_ema: 0, payload_bytes_window: 0, payload_ema: 0,
+        }
     }
 }
 
@@ -123,6 +134,20 @@ const DECAY_THRESHOLD: u64 = 5;
 
 /// BETA-X 6: DECAY_THRESHOLD 이하인 창이 이 횟수 연속되면 채널 회수
 const DECAY_COLD_WINDOWS: u8 = 2;
+
+// ── BETA-X-2 4: 이상 탐지 임계값 ────────────────────────────────────────────
+/// EMA 기준선이 이 이상 확립된 후에만 spike 판정 (초기 과민 반응 방지)
+const ANOMALY_EMA_MIN_BASELINE: u64 = 10; // ×10 고정소수점 → 실제 1msg/창
+/// delta가 rate_ema의 이 배수 이상이면 spike (갑작스러운 폭증)
+const ANOMALY_RATE_SPIKE_MULT: u64 = 20;
+/// spike 판정 최소 절대 메시지 수 (EMA 잡음 방지)
+const ANOMALY_RATE_SPIKE_MIN: u64 = 200;
+/// 페이로드 바이트 spike 배수
+const ANOMALY_PAYLOAD_SPIKE_MULT: u64 = 20;
+
+/// 이상 탐지 reason 코드 (tracer::anomaly extra 필드)
+const ANOMALY_REASON_RATE_SPIKE:    u64 = 0x01;
+const ANOMALY_REASON_PAYLOAD_SPIKE: u64 = 0x02;
 
 const MAX_IPC_PAIRS: usize = 16;
 
@@ -198,8 +223,8 @@ impl PolicyEngine {
         }
     }
 
-    /// BETA-X 1: IPC 이벤트 수신 — from→to 누적 카운트 갱신.
-    pub fn observe_ipc(&mut self, from: Pid, to: Pid, count: u64) {
+    /// BETA-X 1: IPC 이벤트 수신 — from→to 누적 카운트 + 페이로드 바이트 갱신.
+    pub fn observe_ipc(&mut self, from: Pid, to: Pid, count: u64, payload_bytes: u64) {
         // 기존 항목 업데이트
         for i in 0..MAX_IPC_PAIRS {
             if self.ipc_table[i].active
@@ -207,13 +232,19 @@ impl PolicyEngine {
                 && self.ipc_table[i].to == to
             {
                 self.ipc_table[i].count = count;
+                self.ipc_table[i].payload_bytes_window =
+                    self.ipc_table[i].payload_bytes_window.saturating_add(payload_bytes);
                 return;
             }
         }
         // 빈 슬롯에 신규 등록
         for i in 0..MAX_IPC_PAIRS {
             if !self.ipc_table[i].active {
-                self.ipc_table[i] = IpcEntry { from, to, count, active: true, last_count: 0, cold_windows: 0 };
+                self.ipc_table[i] = IpcEntry {
+                    from, to, count, active: true,
+                    last_count: 0, cold_windows: 0,
+                    rate_ema: 0, payload_bytes_window: payload_bytes, payload_ema: 0,
+                };
                 return;
             }
         }
@@ -224,7 +255,11 @@ impl PolicyEngine {
                 min_i = i;
             }
         }
-        self.ipc_table[min_i] = IpcEntry { from, to, count, active: true, last_count: 0, cold_windows: 0 };
+        self.ipc_table[min_i] = IpcEntry {
+            from, to, count, active: true,
+            last_count: 0, cold_windows: 0,
+            rate_ema: 0, payload_bytes_window: payload_bytes, payload_ema: 0,
+        };
     }
 
     /// Policy B-1: mmap 호출 1회 기록.
@@ -304,6 +339,8 @@ impl PolicyEngine {
     /// forced_preempt가 많으면  CPU바운드 → Low
     /// 둘 다 없으면 (idle/dead 기간) → Normal
     fn adapt_and_report(&mut self, tick: u64) {
+        crate::tracer::policy_tick(tick);
+
         let window    = self.report_interval.max(1);
         let old_slice = TIME_SLICE.load(Ordering::Relaxed);
         let mut max_pct: u64 = 0;
@@ -343,7 +380,11 @@ impl PolicyEngine {
                 Priority::Normal
             };
 
+            let old_pri = crate::process::scheduler::get_priority(pid);
             crate::process::scheduler::set_priority(pid, new_pri);
+            if old_pri != new_pri {
+                crate::tracer::priority_boost(pid as u32, old_pri as u8, new_pri as u8);
+            }
 
             crate::serial_println!(
                 "[policy]   pid={} {:12}: 최근{:3}% 누적{:3}%  vol_ema={:4}‰  → {}",
@@ -399,6 +440,7 @@ impl PolicyEngine {
 
                 // BETA-X 2: 임계값 초과 쌍에 fast channel 자동 생성
                 if count >= IPC_HOT_THRESHOLD {
+                    crate::tracer::hot_pair_detected(from as u32, to as u32, count);
                     let n_before = crate::process::ipc_fast::channel_count();
                     let _cap = crate::process::ipc_fast::ensure_channel(from, to);
                     let n_after = crate::process::ipc_fast::channel_count();
@@ -446,7 +488,9 @@ impl PolicyEngine {
                     pid, pid_name(pid), mmap_delta, fault_delta, level,
                 );
                 if mmap_delta >= MEM_HOT_THRESHOLD {
+                    let old_m = crate::process::scheduler::get_priority(pid);
                     crate::process::scheduler::set_priority(pid, crate::process::Priority::High);
+                    crate::tracer::priority_boost(pid as u32, old_m as u8, crate::process::Priority::High as u8);
                     crate::serial_println!(
                         "[policy-M]   └→ pid{} 메모리 할당 빈도 높음 → High 우선순위",
                         pid,
@@ -502,6 +546,48 @@ impl PolicyEngine {
             let from = self.ipc_table[i].from;
             let to   = self.ipc_table[i].to;
 
+            // ── BETA-X-2 4: 이상 탐지 ─────────────────────────────────────
+            let payload_window = self.ipc_table[i].payload_bytes_window;
+            self.ipc_table[i].payload_bytes_window = 0; // 창 리셋
+
+            let rate_ema   = self.ipc_table[i].rate_ema;
+            let payload_ema = self.ipc_table[i].payload_ema;
+
+            // EMA 갱신 (α=0.3, ×10 고정소수점)
+            let new_rate_ema    = (3 * delta * 10 + 7 * rate_ema) / 10;
+            let new_payload_ema = (3 * payload_window * 10 + 7 * payload_ema) / 10;
+            self.ipc_table[i].rate_ema    = new_rate_ema;
+            self.ipc_table[i].payload_ema = new_payload_ema;
+
+            // Spike 판정: EMA 기준선이 확립된 후에만 (초기 과민 반응 방지)
+            let rate_spike = rate_ema >= ANOMALY_EMA_MIN_BASELINE
+                && delta >= ANOMALY_RATE_SPIKE_MIN
+                && delta * 10 > rate_ema * ANOMALY_RATE_SPIKE_MULT;
+
+            let payload_spike = payload_ema >= ANOMALY_EMA_MIN_BASELINE
+                && payload_window * 10 > payload_ema * ANOMALY_PAYLOAD_SPIKE_MULT;
+
+            if rate_spike || payload_spike {
+                let reason = (if rate_spike { ANOMALY_REASON_RATE_SPIKE } else { 0 })
+                           | (if payload_spike { ANOMALY_REASON_PAYLOAD_SPIKE } else { 0 });
+                let cap_id = crate::process::ipc_fast::get_channel(from, to)
+                    .unwrap_or(0);
+                crate::tracer::anomaly(from as u32, to as u32, cap_id as u32, reason);
+                crate::serial_println!(
+                    "[policy-X] !! ANOMALY pid{}→pid{} reason={:#x} \
+                     rate={}/창(EMA={}) payload={}/창(EMA={}) → 강제 회수",
+                    from, to, reason,
+                    delta, rate_ema / 10,
+                    payload_window, payload_ema / 10,
+                );
+                crate::process::ipc_fast::drop_channel(from, to);
+                crate::smp::unpin(from);
+                crate::smp::unpin(to);
+                self.ipc_table[i].active = false;
+                self.ipc_table[i].cold_windows = 0;
+                continue;
+            }
+
             if delta < DECAY_THRESHOLD {
                 self.ipc_table[i].cold_windows =
                     self.ipc_table[i].cold_windows.saturating_add(1);
@@ -521,6 +607,7 @@ impl PolicyEngine {
                         from, to, DECAY_COLD_WINDOWS,
                     );
                 } else {
+                    crate::tracer::decay_warning(from as u32, to as u32, cw as u32, DECAY_COLD_WINDOWS as u32);
                     crate::serial_println!(
                         "[policy-X] decay: pid{}→pid{} 통신 감소 delta={} (cold={}/{})",
                         from, to, delta, cw, DECAY_COLD_WINDOWS,
@@ -572,9 +659,9 @@ pub fn on_switch(from: Pid, to: Pid, tick: u64) {
     unsafe { (*core::ptr::addr_of_mut!(ENGINE)).on_switch(from, to, tick); }
 }
 
-/// BETA-X 1: IPC 이벤트 — Policy Engine에 (from→to, count) 알림.
-pub fn observe_ipc(from: Pid, to: Pid, count: u64) {
-    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).observe_ipc(from, to, count); }
+/// BETA-X 1: IPC 이벤트 — Policy Engine에 (from→to, count, payload_bytes) 알림.
+pub fn observe_ipc(from: Pid, to: Pid, count: u64, payload_bytes: u64) {
+    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).observe_ipc(from, to, count, payload_bytes); }
 }
 
 /// BETA-X 2용: 임계값 이상의 IPC 핫 쌍 목록 반환.
