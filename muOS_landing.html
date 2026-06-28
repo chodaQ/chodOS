@@ -358,38 +358,14 @@
           <a href="#discovery" class="btn-ghost">핵심 발견 →</a>
         </div>
       </div>
-      <div class="hero-right">
-        <div class="milestones">
-          <div class="milestone">
-            <span class="ms-label">Alpha</span>
-            <span class="ms-val ms-done">1–17 완료 ✓</span>
-          </div>
-          <div class="milestone">
-            <span class="ms-label">Beta</span>
-            <span class="ms-val ms-done">1–15 완료 ✓</span>
-          </div>
-          <div class="milestone">
-            <span class="ms-label">Beta-X</span>
-            <span class="ms-val ms-wip">완료 ✓</span>
-          </div>
-          <div class="milestone">
-            <span class="ms-label">Next Target</span>
-            <span class="ms-val ms-next">Fast Channel</span>
-          </div>
+      <div class="hero-right" id="hero-right">
+        <div class="milestones" id="milestones-list">
+          <div class="milestone"><span class="ms-label">로딩 중…</span></div>
         </div>
-        <div class="hero-stat-row">
-          <div class="hero-stat">
-            <div class="sv" style="color:var(--accent);">32×</div>
-            <div class="sk">IPC 속도</div>
-          </div>
-          <div class="hero-stat">
-            <div class="sv" style="color:#4ade80;">11</div>
-            <div class="sk">구현 완료</div>
-          </div>
-          <div class="hero-stat">
-            <div class="sv" style="color:var(--accent2);">Rust</div>
-            <div class="sk">no_std</div>
-          </div>
+        <div class="hero-stat-row" id="stats-row">
+          <div class="hero-stat"><div class="sv" style="color:var(--accent);">…</div><div class="sk">IPC 속도</div></div>
+          <div class="hero-stat"><div class="sv" style="color:#4ade80;">…</div><div class="sk">구현 완료</div></div>
+          <div class="hero-stat"><div class="sv" style="color:var(--accent2);">…</div><div class="sk">no_std</div></div>
         </div>
       </div>
     </div>
@@ -576,75 +552,8 @@
         <div class="eyebrow">개발 현황</div>
         <h2 class="section-title">구현 완료된<br>것들</h2>
       </div>
-      <div class="progress-grid">
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>부팅</strong><small>Limine UEFI + 시리얼</small></div>
-          <span class="pi-badge badge-alpha">Alpha 1</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>GDT / IDT / PIC</strong><small>인터럽트 처리</small></div>
-          <span class="pi-badge badge-alpha">Alpha</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>페이징 + Ring3</strong><small>유저스페이스</small></div>
-          <span class="pi-badge badge-alpha">Alpha</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>선점형 스케줄러</strong><small>EMA 분류, Aging</small></div>
-          <span class="pi-badge badge-alpha">Alpha</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>IPC</strong><small>Zero-copy Capability</small></div>
-          <span class="pi-badge badge-alpha">Alpha 2</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>파일시스템</strong><small>ext4 + tmpfs</small></div>
-          <span class="pi-badge badge-beta">Beta</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>VirtIO Block/Net</strong><small>TCP/IP 스택</small></div>
-          <span class="pi-badge badge-beta">Beta</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>Linux syscall 호환</strong><small>fork/exec/signal</small></div>
-          <span class="pi-badge badge-beta">Beta</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>ELF Loader / mushell</strong><small>mukg 패키지 관리자</small></div>
-          <span class="pi-badge badge-beta">Beta</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>GUI</strong><small>Framebuffer, 마우스/키보드</small></div>
-          <span class="pi-badge badge-beta">Beta</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-done">✓</div>
-          <div class="pi-text"><strong>동적 IPC 최적화</strong><small>전환 비용이 핵심 발견</small></div>
-          <span class="pi-badge badge-betax">Beta-X</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-wip">⬡</div>
-          <div class="pi-text"><strong>Fast Channel 재설계</strong><small>32배 효과 구현</small></div>
-          <span class="pi-badge badge-betax">Next</span>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-todo">○</div>
-          <div class="pi-text"><strong>Policy Engine 확장</strong><small>메모리/전력 정책</small></div>
-        </div>
-        <div class="progress-item">
-          <div class="pi-status pi-todo">○</div>
-          <div class="pi-text"><strong>ML 고도화</strong><small>EMA → Bayesian → LightGBM</small></div>
-        </div>
+      <div class="progress-grid" id="progress-grid">
+        <div class="progress-item" style="grid-column:1/-1;justify-content:center;color:var(--muted);font-size:13px;">로딩 중…</div>
       </div>
     </div>
   </div>
@@ -706,6 +615,59 @@ make run-gui  <span class="cm"># 빌드 + QEMU GUI</span></pre>
     const hero = document.getElementById('hero');
     if (hero) hero.style.paddingTop = '32px';
   }
+
+  // ── progress.json 동적 렌더링 ──────────────────────────────
+  const PHASE_CLASS = {
+    'Alpha': 'badge-alpha', 'Alpha 1': 'badge-alpha', 'Alpha 2': 'badge-alpha',
+    'Beta': 'badge-beta',
+    'Beta-X': 'badge-betax', 'Next': 'badge-betax'
+  };
+  const MS_CLASS = { done: 'ms-done', wip: 'ms-wip', next: 'ms-next' };
+
+  // 이 파일과 같은 raw 경로에서 progress.json 가져오기
+  const rawBase = window.location.pathname.replace(/[^/]+$/, '');
+
+  fetch(rawBase + 'progress.json')
+    .then(r => r.json())
+    .then(data => {
+      // 마일스톤
+      const ml = document.getElementById('milestones-list');
+      if (ml && data.milestones) {
+        ml.innerHTML = data.milestones.map(m => `
+          <div class="milestone">
+            <span class="ms-label">${m.phase}</span>
+            <span class="ms-val ${MS_CLASS[m.status] || ''}">${m.label}</span>
+          </div>`).join('');
+      }
+
+      // 통계
+      const sr = document.getElementById('stats-row');
+      if (sr && data.stats) {
+        const s = data.stats;
+        const doneCount = data.items ? data.items.filter(i => i.status === 'done').length : s.done;
+        sr.innerHTML = `
+          <div class="hero-stat"><div class="sv" style="color:var(--accent);">${s.ipc}</div><div class="sk">IPC 속도</div></div>
+          <div class="hero-stat"><div class="sv" style="color:#4ade80;">${doneCount}</div><div class="sk">구현 완료</div></div>
+          <div class="hero-stat"><div class="sv" style="color:var(--accent2);">${s.lang}</div><div class="sk">no_std</div></div>`;
+      }
+
+      // 진행 목록
+      const pg = document.getElementById('progress-grid');
+      if (pg && data.items) {
+        const icon = { done: '✓', wip: '⬡', todo: '○' };
+        const cls  = { done: 'pi-done', wip: 'pi-wip', todo: 'pi-todo' };
+        pg.innerHTML = data.items.map(item => `
+          <div class="progress-item">
+            <div class="pi-status ${cls[item.status] || 'pi-todo'}">${icon[item.status] || '○'}</div>
+            <div class="pi-text">
+              <strong>${item.label}</strong>
+              ${item.detail ? `<small>${item.detail}</small>` : ''}
+            </div>
+            ${item.phase ? `<span class="pi-badge ${PHASE_CLASS[item.phase] || 'badge-alpha'}">${item.phase}</span>` : ''}
+          </div>`).join('');
+      }
+    })
+    .catch(() => {/* 오프라인이거나 파일 없으면 조용히 실패 */});
 </script>
 </body>
 </html>

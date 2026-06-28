@@ -1,0 +1,29 @@
+{
+  "milestones": [
+    { "phase": "Alpha",  "status": "done", "label": "1–17 완료 ✓" },
+    { "phase": "Beta",   "status": "done", "label": "1–15 완료 ✓" },
+    { "phase": "Beta-X", "status": "wip",  "label": "완료 ✓" },
+    { "phase": "Next",   "status": "next", "label": "Fast Channel" }
+  ],
+  "stats": {
+    "ipc":  "32×",
+    "done": 11,
+    "lang": "Rust"
+  },
+  "items": [
+    { "status": "done", "label": "부팅",             "detail": "Limine UEFI + 시리얼",       "phase": "Alpha 1" },
+    { "status": "done", "label": "GDT / IDT / PIC",  "detail": "인터럽트 처리",              "phase": "Alpha"   },
+    { "status": "done", "label": "페이징 + Ring3",    "detail": "유저스페이스",               "phase": "Alpha"   },
+    { "status": "done", "label": "선점형 스케줄러",   "detail": "EMA 분류, Aging",            "phase": "Alpha"   },
+    { "status": "done", "label": "IPC",              "detail": "Zero-copy Capability",       "phase": "Alpha 2" },
+    { "status": "done", "label": "파일시스템",        "detail": "ext4 + tmpfs",               "phase": "Beta"    },
+    { "status": "done", "label": "VirtIO Block/Net", "detail": "TCP/IP 스택",                "phase": "Beta"    },
+    { "status": "done", "label": "Linux syscall 호환","detail": "fork/exec/signal/threading","phase": "Beta"    },
+    { "status": "done", "label": "ELF Loader / mushell","detail": "mukg 패키지 관리자",      "phase": "Beta"    },
+    { "status": "done", "label": "GUI",              "detail": "Framebuffer, 마우스/키보드", "phase": "Beta"    },
+    { "status": "done", "label": "동적 IPC 최적화",  "detail": "전환 비용이 핵심 발견",      "phase": "Beta-X"  },
+    { "status": "wip",  "label": "Fast Channel 재설계","detail": "32배 효과 구현",           "phase": "Next"    },
+    { "status": "todo", "label": "Policy Engine 확장","detail": "메모리/전력 정책" },
+    { "status": "todo", "label": "ML 고도화",        "detail": "EMA → Bayesian → LightGBM" }
+  ]
+}
