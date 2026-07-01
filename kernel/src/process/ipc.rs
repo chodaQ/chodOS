@@ -39,13 +39,11 @@ use super::{Message, Pid};
 pub fn send(to: Pid, data: &[u8]) -> bool {
     let sender = scheduler::current_pid();
 
-    // BETA-X 2: fast channel이 있으면 SharedBuffer에 기록 후 sentinel 전송
+    // BETA-X-2 5: switchless 경로 — sentinel 없음, yield 없음, 도어벨만 사용
     if let Some(cap_id) = super::ipc_fast::get_channel(sender, to) {
-        if super::ipc_fast::write_fast(cap_id, data) {
-            let msg = Message { sender, len: 0, data: [0u8; 64], fast_cap: cap_id };
-            return scheduler::send_msg(to, msg);
-        }
-        // write 실패 시 (CapId 만료) 일반 경로로 fallback
+        return super::ipc_cap::send_switchless(cap_id, data);
+        // write_fast + sentinel 경로 제거됨:
+        // 수신자는 recv()에서 도어벨을 폴링하므로 sentinel 불필요
     }
 
     // 일반 경로: 64바이트 인라인 복사
@@ -79,24 +77,40 @@ pub fn send(to: Pid, data: &[u8]) -> bool {
 /// }
 /// ```
 pub fn recv() -> Option<Message> {
-    let msg = scheduler::recv_msg()?;
-
-    // BETA-X 2: fast channel 알림 → SharedBuffer에서 실제 데이터를 투명하게 채움
-    if msg.fast_cap != 0 {
-        let filled = super::ipc_cap::read_shared(msg.fast_cap, |data| {
-            let mut m = Message {
-                sender: msg.sender,
-                len: data.len().min(64),
-                data: [0u8; 64],
-                fast_cap: msg.fast_cap, // 보존: 64B 초과 데이터는 직접 read_shared 사용
-            };
-            m.data[..m.len].copy_from_slice(&data[..m.len]);
-            m
-        });
-        // SharedBuffer가 이미 해제됐으면 sentinel 그대로 반환 (안전 fallback)
-        return Some(filled.unwrap_or(msg));
+    // BETA-X-2 5: switchless 우선 확인 — 큐 접근 전에 도어벨 폴링
+    // 내 PID로 들어오는 fast channel 목록에서 도어벨이 설정된 것을 찾음
+    let my_pid = scheduler::current_pid();
+    let mut incoming = [(0u64, 0u64); 8];
+    let n = super::ipc_fast::find_incoming_channels(my_pid, &mut incoming, 8);
+    for &(cap_id, from) in &incoming[..n] {
+        let mut buf = [0u8; 64];
+        if let Some(len) = super::ipc_cap::poll_switchless(cap_id, &mut buf) {
+            return Some(Message {
+                sender: from,
+                len: len,
+                data: buf,
+                fast_cap: 0, // 이미 복사됨, cap 노출 불필요
+            });
+        }
     }
 
+    // 일반 큐 경로 (switchless 없는 채널 또는 sentinel 기반 레거시)
+    let msg = scheduler::recv_msg()?;
+    // 레거시 fast_cap sentinel 처리 (switchless로 전환 전 생성된 채널 안전망)
+    if msg.fast_cap != 0 {
+        let filled = super::ipc_cap::read_shared(msg.fast_cap, |data| {
+            let copy_len = data.len().min(64);
+            let mut m = Message {
+                sender: msg.sender,
+                len: copy_len,
+                data: [0u8; 64],
+                fast_cap: msg.fast_cap,
+            };
+            m.data[..copy_len].copy_from_slice(&data[..copy_len]);
+            m
+        });
+        return Some(filled.unwrap_or(msg));
+    }
     Some(msg)
 }
 

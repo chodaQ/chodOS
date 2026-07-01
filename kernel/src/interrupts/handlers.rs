@@ -71,19 +71,36 @@ pub extern "C" fn exception_handler(frame: &ExceptionFrame) {
         v
     } else { 0 };
 
-    // BETA 10: 유저모드 폴트(CS & 3 == 3) → SIGSEGV/SIGBUS 전달 후 프로세스 종료
+    // BETA 10: 유저모드 폴트(CS & 3 == 3)
     let is_user = frame.cs & 3 == 3;
-    if is_user && (vec == 14 || vec == 17) {
-        // Policy B-1: 유저 모드 페이지 폴트/버스 에러 기록
-        if vec == 14 {
-            crate::policy::observe_page_fault(crate::process::scheduler::current_pid());
+    if is_user && vec == 14 {
+        // BETA 17: not-present fault (error_code bit0=P=0) → demand paging 시도
+        // P=0: 페이지 자체가 없어서 발생 → VMA 확인 후 동적 할당
+        // P=1: 페이지 있지만 접근 권한 위반 → SIGSEGV
+        if ec & 1 == 0 {
+            let cr3: u64;
+            unsafe {
+                core::arch::asm!("mov {}, cr3", out(reg) cr3,
+                    options(nomem, nostack, preserves_flags));
+            }
+            if crate::process::vma::try_demand_page(cr2, cr3) {
+                // 페이지 할당 성공 → 예외 반환 후 faulting instruction 재실행
+                return;
+            }
         }
-        let sig = if vec == 14 { crate::signal::SIGSEGV } else { crate::signal::SIGBUS };
-        crate::serial_println!("\n[signal] user fault vec={} CR2={:#x} → sig={}", vec, cr2, sig);
-        crate::signal::raise_signal(sig);
-        // 유저 프로세스 종료 (핸들러가 없으면 default=terminate, 있어도 다음 syscall에서 전달)
-        // 즉각 종료로 단순화 (무한 폴트 루프 방지)
-        crate::syscall::sys_exit_impl(128 + sig as u64);
+        // 보호 위반 또는 demand page 실패 → SIGSEGV
+        crate::policy::observe_page_fault(crate::process::scheduler::current_pid());
+        crate::serial_println!(
+            "\n[signal] user #PF CR2={:#x} ec={:#x} (P={} W={}) → SIGSEGV",
+            cr2, ec, ec & 1, (ec >> 1) & 1,
+        );
+        crate::signal::raise_signal(crate::signal::SIGSEGV);
+        crate::syscall::sys_exit_impl(128 + crate::signal::SIGSEGV as u64);
+    }
+    if is_user && vec == 17 {
+        crate::serial_println!("\n[signal] user #AC → SIGBUS");
+        crate::signal::raise_signal(crate::signal::SIGBUS);
+        crate::syscall::sys_exit_impl(128 + crate::signal::SIGBUS as u64);
     }
 
     crate::serial_println!("\n!!! CPU EXCEPTION !!!");

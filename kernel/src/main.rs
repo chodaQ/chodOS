@@ -751,6 +751,821 @@ pub extern "C" fn _start() -> ! {
     }
     serial_println!("--- VFS demo complete ---\n");
 
+    // ── BETA 16/17: mprotect + Demand Paging 인커널 검증 ────────────────────
+    {
+        serial_println!("===========================================");
+        serial_println!("  BETA 16: mprotect  /  BETA 17: Demand Paging");
+        serial_println!("===========================================");
+
+        use process::vma;
+
+        // 검증 1: lazy VMA 등록 + try_demand_page 직접 호출
+        let test_va: u64 = 0x0000_7FFF_1000_0000;
+        vma::insert(test_va, 2, vma::PROT_READ | vma::PROT_WRITE, true);
+
+        let cr3: u64;
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)); }
+
+        let ok0 = vma::try_demand_page(test_va,        cr3);
+        let ok1 = vma::try_demand_page(test_va + 4096, cr3);
+        serial_println!(
+            "[beta17] demand alloc: page0={} page1={}  {}",
+            ok0, ok1,
+            if ok0 && ok1 { "✓" } else { "✗ FAIL" },
+        );
+
+        // 검증 2: HHDM을 통한 실제 R/W 왕복
+        if ok0 {
+            if let Some(phys) = unsafe { crate::paging::virt_to_phys(cr3, test_va) } {
+                let hhdm_va = phys + crate::paging::get_hhdm_offset();
+                unsafe {
+                    let ptr = hhdm_va as *mut u64;
+                    *ptr = 0xDEAD_BEEF_1234_5678;
+                    let read = *ptr;
+                    serial_println!(
+                        "[beta17] R/W 왕복: write={:#x} read={:#x}  {}",
+                        0xDEAD_BEEF_1234_5678u64, read,
+                        if read == 0xDEAD_BEEF_1234_5678 { "✓" } else { "✗ FAIL" },
+                    );
+                }
+            }
+        }
+
+        // 검증 3: mprotect RO — PTE_WRITABLE 제거
+        // sys_mprotect는 current_cr3() 사용 → 커널 컨텍스트에서 0 반환
+        // 직접 set_page_prot으로 PTE 변경을 검증
+        vma::update_prot(test_va, 4096, vma::PROT_READ);
+        unsafe { crate::paging::set_page_prot(cr3, test_va, 1, vma::PROT_READ); }
+        if let Some(pte) = crate::paging::get_user_pte(cr3, test_va) {
+            let writable = pte & (1 << 1) != 0;
+            serial_println!(
+                "[beta16] mprotect RO: PTE_WRITABLE={}  {}",
+                writable as u8,
+                if !writable { "✓" } else { "✗ FAIL" },
+            );
+        }
+
+        // 검증 4: mprotect RW 복구 — PTE_WRITABLE 재설정
+        vma::update_prot(test_va, 4096, vma::PROT_READ | vma::PROT_WRITE);
+        unsafe { crate::paging::set_page_prot(cr3, test_va, 1, vma::PROT_READ | vma::PROT_WRITE); }
+        if let Some(pte) = crate::paging::get_user_pte(cr3, test_va) {
+            let writable = pte & (1 << 1) != 0;
+            serial_println!(
+                "[beta16] mprotect RW 복구: PTE_WRITABLE={}  {}",
+                writable as u8,
+                if writable { "✓" } else { "✗ FAIL" },
+            );
+        }
+
+        serial_println!("--- BETA 16/17 complete ---\n");
+    }
+
+    // ── BETA-X-2 2/3: 비대칭 권한 매핑 + 격리 검증 ──────────────────────────
+    serial_println!("===========================================");
+    serial_println!("  BETA-X-2 2/3: 비대칭 권한 매핑 + 격리 검증");
+    serial_println!("  write_va(HHDM): PTE_WRITABLE=1  (송신자 전용)");
+    serial_println!("  read_va(RO_WIN): PTE_WRITABLE=0  (수신자 읽기 전용)");
+    serial_println!("===========================================");
+    {
+        let (write_va, read_va, phys) = unsafe { crate::paging::alloc_channel_frame() };
+
+        let wpte_ok = crate::paging::get_kernel_pte(write_va)
+            .map(|p| p & 2 != 0)
+            .unwrap_or(false);
+        serial_println!("[beta-x2-2] write_va={:#x}  PTE_WRITABLE={}  {}",
+            write_va, wpte_ok as u8, if wpte_ok { "✓" } else { "✗ FAIL" });
+
+        let rpte_ok = crate::paging::get_kernel_pte(read_va as u64)
+            .map(|p| p & 2 == 0 && p & 1 != 0)
+            .unwrap_or(false);
+        serial_println!("[beta-x2-3] read_va={:#x}   PTE_WRITABLE=0  {}",
+            read_va as u64, if rpte_ok { "✓" } else { "✗ FAIL" });
+
+        const ASYM_PATTERN: u64 = 0x5A5A_DEAD_5A5A_BEEF;
+        unsafe { (write_va as *mut u64).write_volatile(ASYM_PATTERN); }
+        let rb = unsafe { (read_va as *const u64).read_volatile() };
+        serial_println!("[beta-x2-3] W→R 왕복: write={:#x} read={:#x}  {}",
+            ASYM_PATTERN, rb, if rb == ASYM_PATTERN { "✓" } else { "✗ FAIL" });
+
+        unsafe { crate::paging::free_channel_frame(phys); }
+    }
+    serial_println!("--- BETA-X-2 2/3 complete ---\n");
+
+    // ── BETA-X-2 5: Switchless 직접 통신 검증 ────────────────────────────────
+    serial_println!("===========================================");
+    serial_println!("  BETA-X-2 5: Switchless 직접 통신 검증");
+    serial_println!("  도어벨 기반 lock-free send→poll 왕복");
+    serial_println!("===========================================");
+    {
+        const SW_FROM: u64 = 252;
+        const SW_TO:   u64 = 253;
+        let sw_cap = process::ipc_fast::ensure_channel_cap(SW_FROM, SW_TO, 64);
+
+        let test_data = b"switchless-ok";
+        let sent = process::ipc_cap::send_switchless(sw_cap, test_data);
+        let doorbell = process::ipc_cap::doorbell_pending(sw_cap);
+
+        let mut recv_buf = [0u8; 64];
+        let recv_len = process::ipc_cap::poll_switchless(sw_cap, &mut recv_buf);
+
+        let data_ok = recv_len == Some(test_data.len())
+            && recv_buf[..test_data.len()] == *test_data;
+
+        serial_println!(
+            "[beta-x2-5] send={}  doorbell={}  recv={:?}B  data={}  {}",
+            sent, doorbell, recv_len,
+            if data_ok { "일치" } else { "불일치" },
+            if sent && data_ok { "✓" } else { "✗ FAIL" },
+        );
+        process::ipc_fast::drop_channel(SW_FROM, SW_TO);
+    }
+    serial_println!("--- BETA-X-2 5 complete ---\n");
+
+    // ── BETA-X-2 4: 이상 탐지 + 강제 회수 ───────────────────────────────────
+    serial_println!("===========================================");
+    serial_println!("  BETA-X-2 4: 이상 탐지 + 강제 회수");
+    serial_println!("  가상 pid254→255: 3창 기준선(15/창) → spike(300/창)");
+    serial_println!("  EMA 20× 초과 → ANOMALY + 채널 강제 회수");
+    serial_println!("===========================================");
+    {
+        const ANOM_FROM: u64 = 254;
+        const ANOM_TO:   u64 = 255;
+
+        for w in 0u64..3 {
+            crate::policy::observe_ipc(ANOM_FROM, ANOM_TO, (w + 1) * 15, 0);
+            serial_println!("[beta-x2-4] 기준선 창 {}: count={}", w + 1, (w + 1) * 15);
+            let t0 = interrupts::handlers::TICK.load(core::sync::atomic::Ordering::Relaxed);
+            while interrupts::handlers::TICK.load(core::sync::atomic::Ordering::Relaxed)
+                .wrapping_sub(t0) < 40
+            {
+                unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+            }
+        }
+
+        // spike: count 300 추가 → EMA 대비 20× 초과
+        crate::policy::observe_ipc(ANOM_FROM, ANOM_TO, 3 * 15 + 300, 0);
+        serial_println!("[beta-x2-4] spike 창: count=345 (+300) → 이상 탐지 대기...");
+        let t0 = interrupts::handlers::TICK.load(core::sync::atomic::Ordering::Relaxed);
+        while interrupts::handlers::TICK.load(core::sync::atomic::Ordering::Relaxed)
+            .wrapping_sub(t0) < 40
+        {
+            unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+        }
+    }
+    serial_println!("--- BETA-X-2 4 complete ---\n");
+
+    // ── ML 비교 벤치마크: Baseline / ML1 / ML2 / ML3 ─────────────────────────
+    // 4개 분류기를 동일한 합성 IPC 트레이스에 독립 실행, 정확도 비교.
+    {
+        serial_println!("===========================================");
+        serial_println!("  ML 분류기 비교 벤치마크");
+        serial_println!("  Baseline vs ML1(Bayesian) vs ML2(GBDT) vs ML3(RL)");
+        serial_println!("===========================================");
+
+        // ── 내부 헬퍼 함수 (no_std, 힙 없음) ─────────────────────────────────
+
+        // bench_ml2: ml2_gbdt의 standalone 사본 (policy 모듈 의존 없음)
+        fn bench_ml2(f_alpha: i64, f_beta: i64, f_rate: i64, f_cold: i64, f_trend: i64) -> i64 {
+            let t1: i64 = if f_alpha >= 10 {
+                if f_cold == 0 { 200 } else if f_alpha >= 20 { 140 } else { 80 }
+            } else if f_rate >= 20 { if f_alpha >= 5 { 60 } else { 20 } } else { 0 };
+            let t2: i64 = if f_rate >= 15 {
+                if f_alpha >= 6 { 160 } else if f_trend == 1 { 80 } else { 30 }
+            } else if f_alpha >= 8 { 60 } else { 0 };
+            let t3: i64 = if f_cold >= 2 { -80 }
+                else if f_cold >= 1 { if f_alpha >= 12 { 40 } else { -20 } }
+                else if f_rate >= 30 { 120 } else { 40 };
+            let t4: i64 = if f_beta <= 5 { if f_alpha >= 8 { 100 } else { 30 } }
+                else if f_alpha >= 25 { 50 }
+                else if f_beta >= 10 { -40 } else { -10 };
+            t1 + t2 + t3 + t4
+        }
+
+        // print_bench_row: 분류기 결과와 정답 레이블로 H/. 패턴 + 지표 출력
+        fn print_bench_row(
+            label: &str,
+            result:  &[bool; 10],
+            truth:   &[bool; 10],
+        ) {
+            let mut tp = 0u32; let mut tn = 0u32;
+            let mut fp = 0u32; let mut fn_ = 0u32;
+            let mut first: i32 = -1;
+            let mut pat = [b'.'; 10];
+            for w in 0..10 {
+                let r = result[w]; let t = truth[w];
+                if r { pat[w] = b'H'; }
+                match (r, t) {
+                    (true,  true)  => { tp += 1; if first < 0 { first = w as i32; } }
+                    (false, false) => { tn += 1; }
+                    (true,  false) => { fp += 1; }
+                    (false, true)  => { fn_ += 1; }
+                }
+            }
+            let s = core::str::from_utf8(&pat).unwrap_or("??????????");
+            let total = (tp + tn + fp + fn_) as u32;
+            let acc = if total > 0 { (tp + tn) * 100 / total } else { 0 };
+            crate::serial_println!(
+                "  {:12} [{}]  TP={} TN={} FP={} FN={}  Acc={}%  첫HOT={}",
+                label, s, tp, tn, fp, fn_, acc,
+                if first >= 0 { first } else { -1 },
+            );
+        }
+
+        // ── 시나리오 정의 ──────────────────────────────────────────────────────
+        // ground truth: 이 정도면 HOT이 맞다는 도메인 기준
+        //   A 지속: 4창 이상 충분한 IPC → w4부터 HOT
+        //   B 스파이크: 갑작스러운 폭증 후 침묵 → 절대 HOT 아님
+        //   C HOT→COLD: 4창 활성 후 소멸 → w0-3만 HOT
+        //   D 느린성장: 점점 가속 → w7부터 HOT
+
+        let sc_names:  [&str; 4] = [
+            "A: 지속HOT  ",
+            "B: 스파이크 ",
+            "C: HOT→COLD ",
+            "D: 느린성장 ",
+        ];
+        let sc_deltas: [[u64; 10]; 4] = [
+            [10, 15, 20, 25, 30, 35, 40, 45, 50, 55],  // A
+            [ 0,  0,  0,300,  0,  0,  0,  0,  0,  0],  // B
+            [60, 70, 80, 90,  0,  0,  0,  0,  0,  0],  // C
+            [ 3,  5,  8, 12, 18, 28, 40, 60, 90,130],  // D
+        ];
+        let sc_truth: [[bool; 10]; 4] = [
+            [false,false,false,false,true,true,true,true,true,true],   // A: w4+
+            [false,false,false,false,false,false,false,false,false,false], // B: 없음
+            [true,true,true,true,false,false,false,false,false,false], // C: w0-3
+            [false,false,false,false,false,false,false,true,true,true],// D: w7+
+        ];
+
+        // 시나리오별 집계용 (5분류기 × 4시나리오 Acc 저장: Baseline/ML1/ML2/ML3/Ensemble)
+        let mut summary_acc = [[0u32; 5]; 4]; // [scenario][classifier]
+
+        for sc in 0..4usize {
+            let deltas = &sc_deltas[sc];
+            let truth  = &sc_truth[sc];
+            serial_println!("[ml-bench] ── {} deltas={:?}", sc_names[sc], deltas);
+
+            let mut results = [[false; 10]; 5]; // [classifier][window]: 0=Base,1=ML1,2=ML2,3=ML3,4=Ens
+
+            // ── [0] Baseline: 누적 count >= 100 ────────────────────────────────
+            {
+                let mut cum: u64 = 0;
+                for w in 0..10 { cum += deltas[w]; results[0][w] = cum >= 100; }
+            }
+
+            // ── [1] ML1 Bayesian: score=α*1000/(α+β+1) >= 650 ─────────────────
+            // ML1 튜닝: GAIN_CAP=5(spike 억제), COLD_DECAY=3(빠른 망각)
+            {
+                let (mut a, mut b) = (1u32, 4u32);
+                for w in 0..10 {
+                    let d = deltas[w];
+                    if d > 0 {
+                        a = a.saturating_add(((d / 10) as u32).max(2).min(5)).min(500);
+                        b = b.saturating_sub(1).max(4);
+                    } else {
+                        b = b.saturating_add(1).min(500);
+                        a = a.saturating_sub(3).max(1);
+                    }
+                    let score = (a as u64) * 1000 / (a as u64 + b as u64 + 1);
+                    results[1][w] = score >= 650;
+                }
+            }
+
+            // ── [2] ML2 GBDT: bench_ml2(...) >= 300 ───────────────────────────
+            {
+                let (mut a, mut b) = (1u32, 4u32);
+                let mut rate_ema: u64 = 0;
+                let mut cold: u8 = 0;
+                let mut dprev: u64 = 0;
+                for w in 0..10 {
+                    let d = deltas[w];
+                    if d > 0 {
+                        // 튜닝된 Bayesian 업데이트 (α feature → ML2 입력)
+                        a = a.saturating_add(((d / 10) as u32).max(2).min(5)).min(500);
+                        b = b.saturating_sub(1).max(4);
+                        cold = 0;
+                    } else {
+                        b = b.saturating_add(1).min(500);
+                        a = a.saturating_sub(3).max(1);
+                        cold = cold.saturating_add(1);
+                    }
+                    rate_ema = (3 * d * 10 + 7 * rate_ema) / 10;
+                    let trend: i64 = if dprev * 10 > rate_ema { 1 } else { 0 };
+                    dprev = d;
+                    let score = bench_ml2(
+                        a as i64, b as i64, (rate_ema / 10) as i64, cold as i64, trend,
+                    );
+                    results[2][w] = score >= 300;
+                }
+            }
+
+            // ── [3] ML3 Q-learning: ε-greedy, 신선한 Q-table ──────────────────
+            {
+                let (mut a, mut b) = (1u32, 4u32);
+                let mut rate_ema: u64 = 0;
+                let mut cold: u8 = 0;
+                let mut dprev: u64 = 0;
+                let mut q: [[i32; 4]; 36] = [[10, 0, 0, 0]; 36]; // NOOP bias
+                let mut prev_s: usize = 0;
+                let mut action: u8 = 0; // NOOP
+                let mut rng: u64 = 0xdeadbeef_12345678u64
+                    .wrapping_add(sc as u64 * 0x9e3779b9);
+                const EPS: u8 = 20; // 20% 탐색
+
+                for w in 0..10 {
+                    let d = deltas[w];
+                    if d > 0 {
+                        // 튜닝된 Bayesian 업데이트 (α/β → ML3 state feature)
+                        a = a.saturating_add(((d / 10) as u32).max(2).min(5)).min(500);
+                        b = b.saturating_sub(1).max(4);
+                        cold = 0;
+                    } else {
+                        b = b.saturating_add(1).min(500);
+                        a = a.saturating_sub(3).max(1);
+                        cold = cold.saturating_add(1);
+                    }
+                    rate_ema = (3 * d * 10 + 7 * rate_ema) / 10;
+                    let trend: i64 = if dprev * 10 > rate_ema { 1 } else { 0 };
+                    dprev = d;
+
+                    // ML2 score → action으로 임계값 조정
+                    let ml2 = bench_ml2(
+                        a as i64, b as i64, (rate_ema / 10) as i64, cold as i64, trend,
+                    );
+                    let eff_thr: i64 = match action {
+                        1 => 220, // ENCOURAGE
+                        2 => 380, // DISCOURAGE
+                        _ => 300,
+                    };
+                    results[3][w] = ml2 >= eff_thr || action == 3; // 3=PIN_PUSH
+
+                    // state bucket
+                    let ab = if a >= 25 { 3 } else if a >= 10 { 2 } else if a >= 3 { 1 } else { 0 };
+                    let rb = if rate_ema / 10 >= 21 { 2 } else if rate_ema / 10 >= 6 { 1 } else { 0 };
+                    let cb = if cold >= 2 { 2 } else { cold as usize };
+                    let next_s = ab * 9 + rb * 3 + cb;
+
+                    // reward
+                    let reward: i32 = if d == 0 {
+                        if action == 1 { -4 } else { -1 }
+                    } else if d >= 20 {
+                        match action { 1 | 3 => 12, 0 => 5, _ => -2 }
+                    } else { 2 };
+
+                    // Bellman update
+                    let max_n = { let mut m=q[next_s][0]; for k in 1..4 { if q[next_s][k]>m{m=q[next_s][k];} } m };
+                    let td = reward * 100 + (9 * max_n) / 10 - q[prev_s][action as usize];
+                    q[prev_s][action as usize] += td / 10;
+
+                    // ε-greedy next action
+                    let r1 = { let mut x=rng; x^=x<<13; x^=x>>7; x^=x<<17; rng=x; x % 100 };
+                    action = if r1 < EPS as u64 {
+                        let r2 = { let mut x=rng; x^=x<<13; x^=x>>7; x^=x<<17; rng=x; x };
+                        (r2 % 4) as u8
+                    } else {
+                        let mut best=0u8; let mut bq=q[next_s][0];
+                        for k in 1..4usize { if q[next_s][k]>bq{bq=q[next_s][k];best=k as u8;} }
+                        best
+                    };
+                    prev_s = next_s;
+                }
+            }
+
+            // ── [4] ML4 Ensemble: ML1 AND ML2 동시 동의 시에만 HOT ──────────────
+            // 두 분류기가 모두 HOT이어야 채택 → FP 감소, recall 유지
+            for w in 0..10 {
+                results[4][w] = results[1][w] && results[2][w];
+            }
+
+            // 결과 출력 + 집계
+            let clf_names = ["Baseline", "ML1 Bay ", "ML2 GBDT", "ML3 RL  ", "ML4 Ens "];
+            for c in 0..5 {
+                // accuracy 계산
+                let r = &results[c]; let t = truth;
+                let mut correct = 0u32;
+                for w in 0..10 { if r[w] == t[w] { correct += 1; } }
+                summary_acc[sc][c] = correct * 100 / 10;
+                print_bench_row(clf_names[c], r, t);
+            }
+            serial_println!("");
+        }
+
+        // ── 전체 요약 ──────────────────────────────────────────────────────────
+        serial_println!("[ml-bench] ── 전체 정확도 요약 (각 시나리오 10창 기준) ──");
+        serial_println!("  분류기    │  A지속  B스파  C전환  D성장 │  평균");
+        for c in 0..5 {
+            let clf_names = ["Baseline", "ML1 Bay ", "ML2 GBDT", "ML3 RL  ", "ML4 Ens "];
+            let a = summary_acc[0][c];
+            let b = summary_acc[1][c];
+            let cc = summary_acc[2][c];
+            let d = summary_acc[3][c];
+            let avg = (a + b + cc + d) / 4;
+            serial_println!("  {} │  {:3}%  {:3}%  {:3}%  {:3}% │  {:3}%",
+                clf_names[c], a, b, cc, d, avg);
+        }
+        serial_println!("[ml-bench] complete ---\n");
+
+        // ── ML3 장기 수렴 실험: 100창 × 4시나리오, 25창 단위 정확도 추적 ─────
+        // 10창 평가에서 "과소학습"으로 결론 보류된 ML3 Q-learning을
+        // 100창(동일 패턴 10회 반복)으로 재평가. Q-table이 수렴하는지 확인.
+        {
+            serial_println!("[ml3-conv] ── ML3 장기 수렴 실험 (4시나리오 × 100창) ──");
+            serial_println!("[ml3-conv]   시나리오    │  w0-24  w25-49 w50-74 w75-99 │ 전체");
+
+            let sc_disp: [&str; 4] = ["A 지속HOT ", "B 스파이크", "C HOT→COLD", "D 느린성장"];
+
+            for sc in 0..4usize {
+                let deltas = &sc_deltas[sc];
+                let truth  = &sc_truth[sc];
+
+                // 시나리오별 독립 Q-table (학습 전부터 시작)
+                let mut q: [[i32; 4]; 36] = [[10, 0, 0, 0]; 36];
+                let mut prev_s: usize = 0;
+                let mut action: u8 = 0;
+                let mut rng: u64 = 0xfeed_dead_cafe_beefu64.wrapping_add(sc as u64 * 7919);
+                const EPS_CONV: u8 = 15; // 15% 탐색 (초반 학습용)
+
+                let (mut a, mut b) = (1u32, 4u32);
+                let mut rate_ema: u64 = 0;
+                let mut cold: u8 = 0;
+                let mut dprev: u64 = 0;
+
+                let mut blk_ok = [0u32; 4]; // 25창 블록별 정답 수
+
+                for w in 0..100usize {
+                    let d = deltas[w % 10];
+
+                    // Bayesian 업데이트 (튜닝 파라미터)
+                    if d > 0 {
+                        a = a.saturating_add(((d / 10) as u32).max(2).min(5)).min(500);
+                        b = b.saturating_sub(1).max(4);
+                        cold = 0;
+                    } else {
+                        b = b.saturating_add(1).min(500);
+                        a = a.saturating_sub(3).max(1);
+                        cold = cold.saturating_add(1);
+                    }
+                    rate_ema = (3 * d * 10 + 7 * rate_ema) / 10;
+                    let trend: i64 = if dprev * 10 > rate_ema { 1 } else { 0 };
+                    dprev = d;
+
+                    // ML2 score
+                    let ml2_s = bench_ml2(
+                        a as i64, b as i64, (rate_ema / 10) as i64, cold as i64, trend,
+                    );
+                    let eff: i64 = match action { 1 => 280, 3 => 0, _ => 300 };
+                    let hot = ml2_s >= eff || action == 3;
+
+                    if hot == truth[w % 10] { blk_ok[w / 25] += 1; }
+
+                    // RL state
+                    let ab = if a>=25{3}else if a>=10{2}else if a>=3{1}else{0};
+                    let rb = if rate_ema/10>=21{2}else if rate_ema/10>=6{1}else{0};
+                    let cb = if cold>=2{2}else{cold as usize};
+                    let ns = ab * 9 + rb * 3 + cb;
+
+                    // reward
+                    let rew: i32 = if d == 0 {
+                        if action == 1 { -4 } else { -1 }
+                    } else if d >= 20 {
+                        match action { 1|3=>12, 0=>5, _=>-2 }
+                    } else { 2 };
+
+                    // Bellman update
+                    let mx = {let mut m=q[ns][0];for k in 1..4{if q[ns][k]>m{m=q[ns][k];}}m};
+                    let td = rew*100 + (9*mx)/10 - q[prev_s][action as usize];
+                    q[prev_s][action as usize] += td / 10;
+
+                    // ε-greedy
+                    let r1={let mut x=rng;x^=x<<13;x^=x>>7;x^=x<<17;rng=x;x%100};
+                    action = if r1 < EPS_CONV as u64 {
+                        let r2={let mut x=rng;x^=x<<13;x^=x>>7;x^=x<<17;rng=x;x};
+                        (r2%4) as u8
+                    } else {
+                        let mut best=0u8;let mut bq=q[ns][0];
+                        for k in 1..4usize{if q[ns][k]>bq{bq=q[ns][k];best=k as u8;}}
+                        best
+                    };
+                    prev_s = ns;
+                }
+
+                let a0=blk_ok[0]*100/25; let a1=blk_ok[1]*100/25;
+                let a2=blk_ok[2]*100/25; let a3=blk_ok[3]*100/25;
+                let tot=(blk_ok[0]+blk_ok[1]+blk_ok[2]+blk_ok[3]);
+                serial_println!("[ml3-conv]   {} │  {:3}%  {:3}%  {:3}%  {:3}% │ {:3}%",
+                    sc_disp[sc], a0, a1, a2, a3, tot);
+            }
+            serial_println!("[ml3-conv] complete ---\n");
+        }
+
+        // ── ML3 공정 재평가: 매 사이클 Bayesian 리셋, Q-table 누적 ──────────────
+        // 실험 10에서 발견된 "상태 누적 오염" 제거.
+        // 10창 사이클 × 10회 반복 = 100창. 각 사이클 시작마다 α/β/EMA 리셋.
+        // Q-table만 사이클 간 유지 → 순수한 RL 수렴 측정.
+        {
+            serial_println!("[ml3-fair] ── ML3 공정 재평가 (Bayesian 리셋/Q-table 누적, 100창) ──");
+            serial_println!("[ml3-fair]   시나리오    │  w0-24  w25-49 w50-74 w75-99 │ 전체");
+
+            let sc_disp2: [&str; 4] = ["A 지속HOT ", "B 스파이크", "C HOT→COLD", "D 느린성장"];
+
+            for sc in 0..4usize {
+                let deltas = &sc_deltas[sc];
+                let truth  = &sc_truth[sc];
+
+                // Q-table은 시나리오별 독립, 100창 내내 누적
+                let mut q: [[i32; 4]; 36] = [[10, 0, 0, 0]; 36];
+                let mut rng: u64 = 0xabcd_1234_ef56_7890u64.wrapping_add(sc as u64 * 6271);
+                const EPS_FAIR: u8 = 20;
+
+                let mut blk_ok = [0u32; 4];
+
+                for cycle in 0..10usize {
+                    // 매 사이클 Bayesian·EMA 리셋 (Q-table은 유지)
+                    let (mut a, mut b) = (1u32, 4u32);
+                    let mut rate_ema: u64 = 0;
+                    let mut cold: u8 = 0;
+                    let mut dprev: u64 = 0;
+                    let mut prev_s: usize = 0;
+                    let mut action: u8 = 0;
+
+                    for w in 0..10usize {
+                        let d = deltas[w];
+
+                        // Bayesian 업데이트 (튜닝 파라미터)
+                        if d > 0 {
+                            a = a.saturating_add(((d/10) as u32).max(2).min(5)).min(500);
+                            b = b.saturating_sub(1).max(4);
+                            cold = 0;
+                        } else {
+                            b = b.saturating_add(1).min(500);
+                            a = a.saturating_sub(3).max(1);
+                            cold = cold.saturating_add(1);
+                        }
+                        rate_ema = (3 * d * 10 + 7 * rate_ema) / 10;
+                        let trend: i64 = if dprev * 10 > rate_ema { 1 } else { 0 };
+                        dprev = d;
+
+                        // ML2 + ML3 action
+                        let ml2_s = bench_ml2(
+                            a as i64, b as i64, (rate_ema/10) as i64, cold as i64, trend,
+                        );
+                        let eff: i64 = match action { 1=>280, 3=>0, _=>300 };
+                        let hot = ml2_s >= eff || action == 3;
+
+                        let gw = cycle * 10 + w;
+                        if hot == truth[w] { blk_ok[gw / 25] += 1; }
+
+                        // RL state bucket
+                        let ab = if a>=25{3}else if a>=10{2}else if a>=3{1}else{0};
+                        let rb = if rate_ema/10>=21{2}else if rate_ema/10>=6{1}else{0};
+                        let cb = if cold>=2{2}else{cold as usize};
+                        let ns = ab*9 + rb*3 + cb;
+
+                        // reward
+                        let rew: i32 = if d == 0 {
+                            if action == 1 { -4 } else { -1 }
+                        } else if d >= 20 {
+                            match action { 1|3=>12, 0=>5, _=>-2 }
+                        } else { 2 };
+
+                        // Bellman update
+                        let mx={let mut m=q[ns][0];for k in 1..4{if q[ns][k]>m{m=q[ns][k];}}m};
+                        let td = rew*100 + (9*mx)/10 - q[prev_s][action as usize];
+                        q[prev_s][action as usize] += td/10;
+
+                        // ε-greedy
+                        let r1={let mut x=rng;x^=x<<13;x^=x>>7;x^=x<<17;rng=x;x%100};
+                        action = if r1 < EPS_FAIR as u64 {
+                            let r2={let mut x=rng;x^=x<<13;x^=x>>7;x^=x<<17;rng=x;x};
+                            (r2%4) as u8
+                        } else {
+                            let mut best=0u8; let mut bq=q[ns][0];
+                            for k in 1..4usize{if q[ns][k]>bq{bq=q[ns][k];best=k as u8;}}
+                            best
+                        };
+                        prev_s = ns;
+                    }
+                }
+
+                let a0=blk_ok[0]*100/25; let a1=blk_ok[1]*100/25;
+                let a2=blk_ok[2]*100/25; let a3=blk_ok[3]*100/25;
+                let tot = blk_ok[0]+blk_ok[1]+blk_ok[2]+blk_ok[3];
+                serial_println!("[ml3-fair]   {} │  {:3}%  {:3}%  {:3}%  {:3}% │ {:3}%",
+                    sc_disp2[sc], a0, a1, a2, a3, tot);
+            }
+            serial_println!("[ml3-fair] complete ---\n");
+        }
+
+        // ── ML3 보상 함수 수정 + 공정 재평가 ──────────────────────────────────
+        // 실험 12 발견: 기존 보상(d≥20→+12)이 spike에서 ENCOURAGE를 학습시킴.
+        // 수정: prev_delta < 5 && d >= 50이면 spike → DISCOURAGE 보상(+10).
+        {
+            serial_println!("[ml3-fix] ── ML3 보상 재설계 + 공정 재평가 ──");
+            serial_println!("[ml3-fix]   시나리오    │  w0-24  w25-49 w50-74 w75-99 │ 전체");
+
+            let sc_disp3: [&str; 4] = ["A 지속HOT ", "B 스파이크", "C HOT→COLD", "D 느린성장"];
+
+            for sc in 0..4usize {
+                let deltas = &sc_deltas[sc];
+                let truth  = &sc_truth[sc];
+
+                let mut q: [[i32; 4]; 36] = [[10, 0, 0, 0]; 36];
+                let mut rng: u64 = 0x1234_abcd_5678_ef90u64.wrapping_add(sc as u64 * 5381);
+                const EPS_FIX: u8 = 10; // 낮춰서 PIN_PUSH 랜덤 탐색 FP 감소 확인
+
+                let mut blk_ok = [0u32; 4];
+
+                for cycle in 0..10usize {
+                    // 매 사이클 Bayesian·EMA 리셋
+                    let (mut a, mut b) = (1u32, 4u32);
+                    let mut rate_ema: u64 = 0;
+                    let mut cold: u8 = 0;
+                    let mut dprev: u64 = 0; // 진짜 이전 창 delta (spike 판별용)
+                    let mut prev_s: usize = 0;
+                    let mut action: u8 = 0;
+
+                    for w in 0..10usize {
+                        let d = deltas[w];
+                        let prev_d = dprev; // 이전 창 delta 저장
+
+                        if d > 0 {
+                            a = a.saturating_add(((d/10) as u32).max(2).min(5)).min(500);
+                            b = b.saturating_sub(1).max(4);
+                            cold = 0;
+                        } else {
+                            b = b.saturating_add(1).min(500);
+                            a = a.saturating_sub(3).max(1);
+                            cold = cold.saturating_add(1);
+                        }
+                        rate_ema = (3 * d * 10 + 7 * rate_ema) / 10;
+                        let trend: i64 = if prev_d * 10 > rate_ema { 1 } else { 0 };
+                        dprev = d;
+
+                        let ml2_s = bench_ml2(
+                            a as i64, b as i64, (rate_ema/10) as i64, cold as i64, trend,
+                        );
+                        // DISCOURAGE: eff=9999로 올려서 스파이크 창에서 HOT 차단
+                        // 기존에는 DISCOURAGE도 eff=300이라 ML2=370인 스파이크를 막지 못했음
+                        let eff: i64 = match action { 1=>280, 2=>9999, 3=>0, _=>300 };
+                        let hot = ml2_s >= eff || action == 3;
+
+                        let gw = cycle * 10 + w;
+                        if hot == truth[w] { blk_ok[gw / 25] += 1; }
+
+                        let ab = if a>=25{3}else if a>=10{2}else if a>=3{1}else{0};
+                        let rb = if rate_ema/10>=21{2}else if rate_ema/10>=6{1}else{0};
+                        let cb = if cold>=2{2}else{cold as usize};
+                        let ns = ab*9 + rb*3 + cb;
+
+                        // 수정된 보상 함수 (spike-aware)
+                        // NOOP=+1→-3: 양수이면 NOOP이 계속 강화돼서 DISCOURAGE로 못 넘어감
+                        let is_spike = d >= 20 && prev_d < 5 && d >= 50;
+                        let rew: i32 = if d == 0 {
+                            if action == 1 { -4 } else { -1 }
+                        } else if is_spike {
+                            match action { 2=>10, 0=>-3, _=>-8 } // DISCOURAGE=2, NOOP=-3
+                        } else if d >= 20 {
+                            match action { 1|3=>12, 0=>5, _=>-2 }
+                        } else { 2 };
+
+                        let mx={let mut m=q[ns][0];for k in 1..4{if q[ns][k]>m{m=q[ns][k];}}m};
+                        let td = rew*100 + (9*mx)/10 - q[prev_s][action as usize];
+                        q[prev_s][action as usize] += td/10;
+
+                        let r1={let mut x=rng;x^=x<<13;x^=x>>7;x^=x<<17;rng=x;x%100};
+                        action = if r1 < EPS_FIX as u64 {
+                            let r2={let mut x=rng;x^=x<<13;x^=x>>7;x^=x<<17;rng=x;x};
+                            (r2%4) as u8
+                        } else {
+                            let mut best=0u8; let mut bq=q[ns][0];
+                            for k in 1..4usize{if q[ns][k]>bq{bq=q[ns][k];best=k as u8;}}
+                            best
+                        };
+                        prev_s = ns;
+                    }
+                }
+
+                let a0=blk_ok[0]*100/25; let a1=blk_ok[1]*100/25;
+                let a2=blk_ok[2]*100/25; let a3=blk_ok[3]*100/25;
+                let tot = blk_ok[0]+blk_ok[1]+blk_ok[2]+blk_ok[3];
+                serial_println!("[ml3-fix]   {} │  {:3}%  {:3}%  {:3}%  {:3}% │ {:3}%",
+                    sc_disp3[sc], a0, a1, a2, a3, tot);
+            }
+            serial_println!("[ml3-fix] complete ---\n");
+
+            // ── [ml3-conv2] 학습/평가 분리: 50사이클 학습(ε=20%) → 50사이클 평가(ε=0) ──
+            // 탐색 노이즈 없는 수렴된 Q-table의 진짜 성능 측정
+            serial_println!("[ml3-conv2] ── ML3 train(50cy)/eval(50cy) 분리 실험 ──");
+            serial_println!("[ml3-conv2]   시나리오    │  eval평균 │ 비고");
+            {
+                let sc_disp4: [&str; 4] = ["A 지속HOT ", "B 스파이크", "C HOT→COLD", "D 느린성장"];
+                for sc in 0..4usize {
+                    let deltas = &sc_deltas[sc];
+                    let truth  = &sc_truth[sc];
+                    let mut q: [[i32; 4]; 36] = [[10, 0, 0, 0]; 36];
+                    let mut rng: u64 = 0x1234_abcd_5678_ef90u64.wrapping_add(sc as u64 * 5381);
+
+                    // Phase 1: 학습 (50사이클, ε=20%)
+                    for _cy in 0..50usize {
+                        let (mut a, mut b) = (1u32, 4u32);
+                        let mut rate_ema: u64 = 0;
+                        let mut cold: u8 = 0;
+                        let mut dprev: u64 = 0;
+                        let mut prev_s: usize = 0;
+                        let mut action: u8 = 0;
+                        for w in 0..10usize {
+                            let d = deltas[w];
+                            let prev_d = dprev;
+                            if d > 0 {
+                                a = a.saturating_add(((d/10) as u32).max(2).min(5)).min(500);
+                                b = b.saturating_sub(1).max(4);
+                                cold = 0;
+                            } else {
+                                b = b.saturating_add(1).min(500);
+                                a = a.saturating_sub(3).max(1);
+                                cold = cold.saturating_add(1);
+                            }
+                            rate_ema = (3*d*10 + 7*rate_ema)/10;
+                            let trend: i64 = if prev_d*10 > rate_ema {1} else {0};
+                            dprev = d;
+                            let ab = if a>=25{3}else if a>=10{2}else if a>=3{1}else{0};
+                            let rb = if rate_ema/10>=21{2}else if rate_ema/10>=6{1}else{0};
+                            let cb = if cold>=2{2}else{cold as usize};
+                            let ns = ab*9 + rb*3 + cb;
+                            let is_spike = d>=20 && prev_d<5 && d>=50;
+                            let rew: i32 = if d==0 {
+                                if action==1{-4}else{-1}
+                            } else if is_spike {
+                                match action{2=>10,0=>-3,_=>-8}
+                            } else if d>=20 {
+                                match action{1|3=>12,0=>5,_=>-2}
+                            } else {2};
+                            let mx={let mut m=q[ns][0];for k in 1..4{if q[ns][k]>m{m=q[ns][k];}}m};
+                            let td=rew*100+(9*mx)/10-q[prev_s][action as usize];
+                            q[prev_s][action as usize]+=td/10;
+                            let r1={let mut x=rng;x^=x<<13;x^=x>>7;x^=x<<17;rng=x;x%100};
+                            action = if r1<20 {
+                                let r2={let mut x=rng;x^=x<<13;x^=x>>7;x^=x<<17;rng=x;x};
+                                (r2%4) as u8
+                            } else {
+                                let mut best=0u8;let mut bq=q[ns][0];
+                                for k in 1..4{if q[ns][k]>bq{bq=q[ns][k];best=k as u8;}}
+                                best
+                            };
+                            prev_s = ns;
+                        }
+                    }
+
+                    // Phase 2: 평가 (50사이클, ε=0 exploit-only)
+                    let mut eval_ok = 0u32;
+                    for _cy in 0..50usize {
+                        let (mut a, mut b) = (1u32, 4u32);
+                        let mut rate_ema: u64 = 0;
+                        let mut cold: u8 = 0;
+                        let mut dprev2: u64 = 0;
+                        let mut prev_s: usize = 0;
+                        let mut action: u8 = 0;
+                        for w in 0..10usize {
+                            let d = deltas[w];
+                            let prev_d2 = dprev2;
+                            if d > 0 {
+                                a = a.saturating_add(((d/10) as u32).max(2).min(5)).min(500);
+                                b = b.saturating_sub(1).max(4);
+                                cold = 0;
+                            } else {
+                                b = b.saturating_add(1).min(500);
+                                a = a.saturating_sub(3).max(1);
+                                cold = cold.saturating_add(1);
+                            }
+                            rate_ema = (3*d*10 + 7*rate_ema)/10;
+                            dprev2 = d;
+                            let trend2: i64 = if prev_d2*10 > rate_ema {1} else {0};
+                            let ml2_s = bench_ml2(
+                                a as i64, b as i64, (rate_ema/10) as i64, cold as i64, trend2,
+                            );
+                            let eff: i64 = match action { 1=>280, 2=>9999, 3=>0, _=>300 };
+                            let hot = ml2_s >= eff || action == 3;
+                            if hot == truth[w] { eval_ok += 1; }
+                            let ab = if a>=25{3}else if a>=10{2}else if a>=3{1}else{0};
+                            let rb = if rate_ema/10>=21{2}else if rate_ema/10>=6{1}else{0};
+                            let cb = if cold>=2{2}else{cold as usize};
+                            let ns = ab*9 + rb*3 + cb;
+                            // exploit-only (ε=0)
+                            let mut best=0u8;let mut bq=q[ns][0];
+                            for k in 1..4{if q[ns][k]>bq{bq=q[ns][k];best=k as u8;}}
+                            action = best;
+                            prev_s = ns;
+                        }
+                    }
+                    let eval_pct = eval_ok * 100 / 500;
+                    serial_println!("[ml3-conv2]   {} │    {:3}%    │ 50cy 학습 후 ε=0",
+                        sc_disp4[sc], eval_pct);
+                }
+            }
+            serial_println!("[ml3-conv2] complete ---\n");
+        }
+    }
+
     // ── BETA-X 3: WM ↔ GFX 드라이버 동적 IPC 채널 시연 ─────────────────────
     serial_println!("===========================================");
     serial_println!("  BETA-X 3: WM <-> GFX 드라이버 fast channel");

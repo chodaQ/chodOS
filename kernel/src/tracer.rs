@@ -40,7 +40,8 @@ pub enum EventKind {
     PriorityBoost   = 5,
     DecayWarning    = 6,
     PolicyTick      = 7,
-    Anomaly         = 8, // BETA-X-2 4 예약
+    Anomaly         = 8,
+    SafetyBound     = 9, // BETA-X-2 6: 안전 한도 차단
 }
 
 impl EventKind {
@@ -54,6 +55,7 @@ impl EventKind {
             Self::DecayWarning    => "DecayWarning   ",
             Self::PolicyTick      => "PolicyTick     ",
             Self::Anomaly         => "Anomaly        ",
+            Self::SafetyBound     => "SafetyBound    ",
         }
     }
 }
@@ -176,7 +178,21 @@ pub fn policy_tick(tick: u64) {
     });
 }
 
-/// BETA-X-2 4 예약: 이상 탐지 강제 회수 시 기록.
+/// BETA-X-2 6: 안전 한도가 차단한 결정을 기록.
+///
+/// | extra bits | 의미                              |
+/// |------------|-----------------------------------|
+/// | 0x1x       | 우선순위 쿨다운 차단 (x=잔여 창)  |
+/// | 0x20       | 창당 채널 생성 한도 초과          |
+/// | 0x30       | 채널 재생성 쿨다운 중             |
+pub fn safety_bound(pid_a: u32, pid_b: u32, reason: u64) {
+    record(TraceEvent {
+        ts: rdtsc(), kind: EventKind::SafetyBound,
+        pid_a, pid_b, cap: 0, extra: reason,
+    });
+}
+
+/// BETA-X-2 4: 이상 탐지 강제 회수 시 기록.
 pub fn anomaly(from: u32, to: u32, cap: u32, reason: u64) {
     record(TraceEvent {
         ts: rdtsc(), kind: EventKind::Anomaly,
@@ -186,12 +202,32 @@ pub fn anomaly(from: u32, to: u32, cap: u32, reason: u64) {
 
 // ── 덤프 ─────────────────────────────────────────────────────────────────────
 
+/// 스냅샷 버퍼 (dump()용 정적 배열 — 스택 오버플로 방지)
+///
+/// dump()가 TRACER 락을 잡은 채 serial 출력을 하면, 동시에 타이머 ISR이
+/// policy_tick() → TRACER.lock()을 시도해 스핀락 데드락이 발생한다.
+/// 해결: 락을 잡는 시간을 최소화(메모리 복사만)하고, 출력은 락 밖에서 수행.
+static mut DUMP_BUF: [TraceEvent; RING_SIZE] = [const { TraceEvent::zero() }; RING_SIZE];
+
 /// ring buffer 전체를 serial로 출력 (오래된 순서).
 pub fn dump() {
-    let t = TRACER.lock();
-    let total = t.total;
-    let count = total.min(RING_SIZE);
+    // 1. 락을 잡고 스냅샷만 복사 (느린 serial 출력은 락 밖에서)
+    let (total, start, count) = {
+        let t = TRACER.lock();
+        let total = t.total;
+        let count = total.min(RING_SIZE);
+        let start = if total >= RING_SIZE { t.head } else { 0 };
+        unsafe {
+            for i in 0..count {
+                let idx = (start + i) % RING_SIZE;
+                DUMP_BUF[i] = t.buf[idx];
+            }
+        }
+        (total, start, count)
+    }; // ← 락 해제 (타이머 ISR이 다시 record 가능)
+    let _ = start;
 
+    // 2. 락 없이 출력
     crate::serial_println!(
         "[tracer] ══════════════════════════════════════════════════════"
     );
@@ -208,11 +244,8 @@ pub fn dump() {
         "[tracer] ──────────────────────────────────────────────────────"
     );
 
-    let start = if total >= RING_SIZE { t.head } else { 0 };
-
     for i in 0..count {
-        let idx = (start + i) % RING_SIZE;
-        let ev  = &t.buf[idx];
+        let ev = unsafe { &DUMP_BUF[i] };
         print_event(i + 1, ev);
     }
 
@@ -262,6 +295,10 @@ fn print_event(seq: usize, ev: &TraceEvent) {
         EventKind::Anomaly => crate::serial_println!(
             "[tracer]  {:>3} {:016x}  {}  pid{}→pid{}  cap={}  reason={:#x}",
             seq, ev.ts, ev.kind.label(), ev.pid_a, ev.pid_b, ev.cap, ev.extra,
+        ),
+        EventKind::SafetyBound => crate::serial_println!(
+            "[tracer]  {:>3} {:016x}  {}  pid{}↔pid{}  reason={:#x}",
+            seq, ev.ts, ev.kind.label(), ev.pid_a, ev.pid_b, ev.extra,
         ),
     }
 }

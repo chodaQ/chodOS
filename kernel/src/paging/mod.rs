@@ -568,6 +568,34 @@ pub fn get_kernel_pte(vaddr: u64) -> Option<u64> {
     }
 }
 
+/// 임의 `cr3` 주소 공간에서 `vaddr`의 최종 PTE 반환 (BETA 16/17 테스트용).
+pub fn get_user_pte(cr3: u64, vaddr: u64) -> Option<u64> {
+    unsafe {
+        let pml4 = table_at(cr3 & !0xFFF);
+        let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+        let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+        let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+        let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+        let pml4e = (*pml4).0[i4];
+        if pml4e & PTE_PRESENT == 0 { return None; }
+        let pdpt = table_at(pml4e & !0xFFF);
+        let pdpte = (*pdpt).0[i3];
+        if pdpte & PTE_PRESENT == 0 { return None; }
+        if pdpte & (1 << 7) != 0 { return Some(pdpte); }
+        let pd = table_at(pdpte & !0xFFF);
+        let pde = (*pd).0[i2];
+        if pde & PTE_PRESENT == 0 { return None; }
+        if pde & (1 << 7) != 0 { return Some(pde); }
+        let pt = table_at(pde & !0xFFF);
+        let pte = (*pt).0[i1];
+        if pte & PTE_PRESENT == 0 { return None; }
+        Some(pte)
+    }
+}
+
+/// HHDM 오프셋 공개 (테스트 코드에서 phys → virt 변환용)
+pub fn get_hhdm_offset() -> u64 { crate::memory::hhdm_offset() }
+
 /// `cr3` 주소 공간에서 `vaddr`부터 `count` 페이지 언매핑 + 물리 프레임 해제.
 pub unsafe fn munmap_pages(cr3: u64, vaddr: u64, count: usize) {
     for i in 0..count as u64 {
@@ -593,6 +621,63 @@ pub unsafe fn munmap_pages(cr3: u64, vaddr: u64, count: usize) {
             // TLB 플러시 (단일 페이지)
             core::arch::asm!("invlpg [{va}]", va = in(reg) va, options(nostack, preserves_flags));
         }
+    }
+}
+
+/// BETA 17: Demand paging — not-present #PF 시 단일 페이지 동적 할당.
+///
+/// - 물리 프레임 할당 → 제로 초기화 → PTE 설정 → invlpg
+/// - `writable`: PROT_WRITE 여부 (false → 읽기 전용)
+pub unsafe fn demand_alloc_page(cr3: u64, vaddr: u64, writable: bool) {
+    let phys = crate::memory::frame::alloc_frame().expect("OOM: demand_alloc_page");
+    // 제로 초기화 (HHDM을 통해 접근)
+    let dst = (phys + hhdm_offset()) as *mut u8;
+    core::ptr::write_bytes(dst, 0, 4096);
+    // PTE 설정
+    let flags = PTE_USER | if writable { PTE_WRITABLE } else { 0 };
+    let pml4 = table_at(cr3 & !0xFFF);
+    map_4k(pml4, vaddr, phys, flags);
+    // 단일 페이지 TLB 플러시
+    core::arch::asm!("invlpg [{va}]", va = in(reg) vaddr, options(nostack, preserves_flags));
+}
+
+/// BETA 16: mprotect — 기존 PTE의 권한 비트를 `prot`에 맞게 변경.
+///
+/// - PROT_WRITE 있으면 PTE_WRITABLE 설정, 없으면 제거
+/// - PROT_NONE(0)이면 PTE_PRESENT 제거 (접근 불가)
+/// - 아직 매핑되지 않은 페이지(lazy)는 건너뜀
+pub unsafe fn set_page_prot(cr3: u64, vaddr: u64, pages: usize, prot: u32) {
+    let pml4 = table_at(cr3 & !0xFFF);
+    for i in 0..pages {
+        let va = vaddr + (i as u64) * 4096;
+        let i4 = ((va >> 39) & 0x1FF) as usize;
+        let i3 = ((va >> 30) & 0x1FF) as usize;
+        let i2 = ((va >> 21) & 0x1FF) as usize;
+        let i1 = ((va >> 12) & 0x1FF) as usize;
+
+        let pml4e = (*pml4).0[i4];
+        if pml4e & PTE_PRESENT == 0 { continue; }
+        let pdpt = table_at(pml4e & !0xFFF);
+        let pdpte = (*pdpt).0[i3];
+        if pdpte & PTE_PRESENT == 0 { continue; }
+        let pd = table_at(pdpte & !0xFFF);
+        let pde = (*pd).0[i2];
+        if pde & PTE_PRESENT == 0 { continue; }
+        let pt = table_at(pde & !0xFFF);
+        let pte = (*pt).0[i1];
+        if pte & PTE_PRESENT == 0 { continue; } // lazy 페이지 — 다음 접근 시 demand alloc이 prot 적용
+
+        let phys_bits = pte & !0xFFF; // 물리 주소 + 상위 플래그 보존
+        let new_pte = if prot == 0 {
+            // PROT_NONE: present 제거 → 접근 시 #PF
+            phys_bits & !PTE_PRESENT
+        } else {
+            let mut f = PTE_PRESENT | PTE_USER;
+            if prot & 2 != 0 { f |= PTE_WRITABLE; } // PROT_WRITE
+            phys_bits | f
+        };
+        (*pt).0[i1] = new_pte;
+        core::arch::asm!("invlpg [{va}]", va = in(reg) va, options(nostack, preserves_flags));
     }
 }
 

@@ -50,6 +50,7 @@ pub mod ipc_cap;
 pub mod ipc_fast; // BETA-X 2: 동적 fast channel 레지스트리
 pub mod scheduler;
 pub mod userproc; // BETA 9: fork/exec/wait4
+pub mod vma;      // BETA 16~17: VMA 테이블 + demand paging
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;

@@ -503,7 +503,7 @@ fn sys_pread64_v4(raw_fd: u64, buf_vaddr: u64, count: u64, offset: u64) -> i64 {
     }
 }
 
-fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: i64, offset: u64) -> i64 {
+fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> i64 {
     const MAP_ANONYMOUS: u64 = 0x20;
     const MAP_FIXED:     u64 = 0x10;
 
@@ -526,23 +526,25 @@ fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: i64, offset: u64) -
         };
         if in_existing {
             if !is_anon {
-                // 파일 데이터로 영역 덮어쓰기
                 fill_mmap_from_fd(addr as *mut u8, pages * 4096, fd as u32, offset as usize);
             } else {
                 unsafe { core::ptr::write_bytes(addr as *mut u8, 0, pages * 4096); }
             }
+            // VMA prot 갱신 (BETA 16)
+            crate::process::vma::update_prot(addr, len, prot as u32);
             return addr as i64;
         }
-        // MAP_FIXED인데 기존 영역 밖: 새로 할당 후 요청 주소로 매핑 시도
-        // (요청 주소를 vaddr로 사용)
+        // MAP_FIXED인데 기존 영역 밖: 새로 할당
         let vaddr = addr;
         if !is_anon {
             let data = read_for_mmap(fd as u32, offset as usize, pages * 4096);
             unsafe { crate::paging::mmap_map(cr3, vaddr, &data, true); }
         } else {
+            // BETA 17: MAP_ANONYMOUS eager (MAP_FIXED는 즉시 매핑 — 주소 고정 필요)
             unsafe { crate::paging::mmap_anon(cr3, vaddr, pages, true); }
         }
         MMAP_TABLE.lock().insert(vaddr, pages);
+        crate::process::vma::insert(vaddr, pages, prot as u32, false);
         crate::serial_println!("[mmap] fixed addr={:#x} pages={} fd={}", vaddr, pages, fd);
         return vaddr as i64;
     }
@@ -551,15 +553,25 @@ fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: i64, offset: u64) -
     let vaddr = crate::process::userproc::alloc_mmap_vaddr(pages);
 
     if is_anon {
-        unsafe { crate::paging::mmap_anon(cr3, vaddr, pages, true); }
+        // BETA 17: MAP_ANONYMOUS → demand paging (lazy)
+        // 물리 페이지를 지금 할당하지 않음 — 첫 접근 시 #PF → demand_alloc_page
+        crate::process::vma::insert(vaddr, pages, prot as u32, true);
+        crate::serial_println!(
+            "[mmap] lazy vaddr={:#x} pages={} prot={:#x} (demand)",
+            vaddr, pages, prot,
+        );
     } else {
+        // 파일 백킹: 즉시 매핑 (파일 데이터 로드 필요)
         let data = read_for_mmap(fd as u32, offset as usize, pages * 4096);
         unsafe { crate::paging::mmap_map(cr3, vaddr, &data, true); }
+        crate::process::vma::insert(vaddr, pages, prot as u32, false);
+        crate::serial_println!(
+            "[mmap] eager vaddr={:#x} pages={} fd={} off={:#x}",
+            vaddr, pages, fd, offset,
+        );
     }
 
     MMAP_TABLE.lock().insert(vaddr, pages);
-    crate::serial_println!("[mmap] vaddr={:#x} pages={} fd={} off={:#x}", vaddr, pages, fd, offset);
-    // Policy B-1: mmap 호출 기록
     crate::policy::observe_mmap(crate::process::scheduler::current_pid());
     vaddr as i64
 }

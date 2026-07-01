@@ -3,7 +3,8 @@
 > "아치 리눅스의 자유도 + macOS의 편안함"
 > Rust no_std, x86_64, Limine UEFI
 >
-> **현재 단계: ALPHA 완료 (1~17) → BETA 1~15 완료 → BETA-X(동적 IPC 최적화) 완료**
+> **현재 단계: ALPHA 완료 (1~17) → BETA 1~15 완료 → BETA-X(동적 IPC 최적화) 완료
+> → ML 1~4 + 장기 수렴 실험 완료**
 > 부팅 → 메모리 → 스케줄러 → IPC → ext4 → TCP/IP → Linux syscall →
 > ELF 실행 → Shell → GUI까지 end-to-end 동작 확인됨.
 >
@@ -14,10 +15,25 @@
 > yield_now()를 생략한 atomic 직접 통신은 32배 빨랐다(A-2 실험).
 > 자세한 3차 실험과 결론은 §4 BETA-X 섹션 참고.
 >
-> **다음 단계(BETA-X-2):** 32배 효과를 그대로 구현하면 Capability 검증을
-> 우회하는 보안 사각지대가 생긴다는 외부 리뷰를 받아, "생성은 엄격하게/
-> 사용은 가볍게" 원칙으로 Event Tracer + 비대칭 권한 매핑 + 이상탐지
-> 강제회수를 먼저 만들고 그 위에서 전환 생략을 구현하는 순서로 진행.
+> **BETA-X-2 완료:** Event Tracer, 비대칭 권한 매핑, 최소 격리 검증, 이상탐지
+> 강제회수, Switchless 직접 통신, Safety Bounds (1~6 전체 완료).
+> BETA 16(mprotect)·17(Demand Paging) 선행 조건도 완료.
+>
+> **ML 실험 전체 완료 (실험 4~10, EXPERIMENTS.md 참고):**
+>
+> | 분류기 | A 지속 | B 스파이크 | C 전환 | D 성장 | 평균 |
+> |--------|-------|-----------|--------|--------|------|
+> | Baseline | 100% | 30% | 30% | 90% | 62% |
+> | ML1 Bayesian (튜닝 전) | 100% | 30% | 30% | 70% | 57% |
+> | ML1 Bayesian (튜닝 후, 실험 8) | 100% | 100% | 70% | 70% | **85%** |
+> | ML2 GBDT (실험 5) | 100% | 90% | 80% | 70% | **85%** |
+> | ML3 RL (10창, 실험 6) | 100% | 90% | 60% | 70% | 80% |
+> | ML4 AND Ensemble (실험 9) | 100% | 100% | 80% | 70% | **87% ← 최고** |
+>
+> ML3 장기 수렴 실험(100창, 실험 10): 61% — RL 학습 실패가 아니라
+> Bayesian 상태 누적으로 ML2 피처 공간이 변하는 문제로 판명.
+>
+> **다음 단계:** §4 "ML 로드맵 — 다음 단계" 참고.
 
 ---
 
@@ -383,15 +399,121 @@ Tier 3 (장기)    : io_uring, BPF, namespaces, cgroups, seccomp
 > 삭제가 아니라 순서 변경 — §4 맨 아래 "BETA 16~28 (보류)" 참고.
 > 그 자리보다 먼저 **BETA-X(동적 IPC 최적화)** 를 진행한다. 이유는 아래 BETA-X 섹션 참고.
 
-### ML — BETA 완료 후 시작
+### ML — BETA-X-2 완료 후 시작 (실험 4~10 전체 완료)
 
-| Milestone | 내용 | 비고 |
+| Milestone | 내용 | 상태 |
 |-----------|------|------|
-| ML 1 | 통계 기반 (EMA → Bayesian) | 여기서부터 ML 단계 시작 |
-| ML 2 | LightGBM 기반 분류 | 대부분의 경우 이 단계로 충분할 가능성이 큼 |
-| ML 3 (필요시) | 강화학습(RL) | 상태공간 정의·수렴 문제가 어려워 최후순위 |
+| ML 1 | Bayesian 분류기 | ✅ 튜닝 완료 (GAIN_CAP=5, COLD_DECAY=3) — 57%→85% |
+| ML 2 | GBDT 분류기 | ✅ 5-feature 4-tree. 단독 85% |
+| ML 3 | Q-learning RL | ✅ 구현·평가 완료. 10창=80%, 장기 수렴 실험=61% |
+| ML 4 | AND Ensemble (ML1∩ML2) | ✅ 87% — 현재 최고 정확도 |
+
+#### 비교 실험 최종 결과 (실험 7·8·9)
+
+| 분류기 | A 지속 | B 스파이크 | C 전환 | D 성장 | 평균 | 비고 |
+|--------|-------|-----------|--------|--------|------|------|
+| Baseline | 100% | 30% | 30% | 90% | 62% | 단순 누적 카운트 |
+| ML1 Bayesian (튜닝 전) | 100% | 30% | 30% | 70% | 57% | β floor 버그 |
+| ML1 Bayesian (튜닝 후) | 100% | 100% | 70% | 70% | 85% | GAIN_CAP=5, DECAY=3 |
+| ML2 GBDT | 100% | 90% | 80% | 70% | 85% | cold_windows 피처 결정적 |
+| ML3 RL (10창) | 100% | 90% | 60% | 70% | 80% | Q-table 미수렴 |
+| **ML4 AND Ensemble** | **100%** | **100%** | **80%** | **70%** | **87%** | **현재 최고** |
+
+**ML1 튜닝 (실험 8) — 핵심 파라미터:**
+```
+BAYES_GAIN_CAP  = 5  : 단일 창 α 최대 증가량 (spike δ=300 → gain=5, not 30)
+BAYES_COLD_DECAY = 3 : cold 창당 α 감소량 (기존 1 → 3으로 빠른 망각)
+→ B 스파이크: 30% → 100% (+70%p)
+→ C 전환:    30% → 70%  (+40%p)
+```
+
+**ML4 AND Ensemble (실험 9) — 핵심 발견:**
+```
+ML1과 ML2의 오판 패턴이 서로 다른 시나리오에서 AND 앙상블이 두 단독 분류기보다 우월:
+- B 시나리오: ML2의 FP 1개(spike)를 ML1이 차단 → 100% 달성
+- FN 증가 없음 — recall 손실 없이 precision만 향상
+```
+
+**ML3 장기 수렴 실험 (실험 10) — 예상과 반대:**
+```
+가설: 100창 학습 → RL 수렴 → 10창 80%보다 높은 정확도
+결과: 100창 평균 61% — 10창 결과(80%)보다 낮음
+
+원인: Q-table 학습 실패가 아니라 Bayesian 상태(α, β, rate_ema) 누적
+      패턴 반복 시 α가 계속 쌓여 ML2 피처 공간이 이동함
+      특히 D 시나리오: "느린 성장" 패턴이 사이클 반복 후엔
+      rate_ema가 이미 높아 ML2 입장에서 "이미 핫"으로 보임 → 34%
+
+교훈: RL 수렴 실험과 장기 상태 실험은 구분해야 함.
+      진정한 RL 수렴 = 매 사이클 Bayesian 상태 리셋 + Q-table만 누적.
+```
+
+> **ML 실험 최종 결론:**
+> ML4 AND Ensemble (87%)이 현재 최고. 실제 Policy Engine에는
+> `is_hot = ml1_hot && ml2_hot` 조합 적용이 권장됨.
+> ML3 Q-learning은 "학습 부족"이 아니라 "상태 누적 취약성"이 본질적 한계.
+> Shadow Mode(ML2 active + ML3 shadow → 자동 전환)는 설계만 됐고 미구현.
+
+#### ML 1 → ML 2 → ML 3 정적 전환의 문제, 그리고 대안 (Shadow Mode)
+
+설계만 됐고 아직 구현하지 않음. 필요해지면 재검토:
+
+```
+Shadow Mode → Gradual Rollout 패턴:
+
+[IPC 패턴 감지]
+       ↓
+  Active 분류기 (ML4 Ensemble, 즉시 결정에 사용)
+       ↓
+  동일 입력을 Shadow 분류기(ML3)에도 계산 (결정에는 미반영, 로그만)
+       ↓
+  사후 검증 프록시: "HOT 판단 후 즉시 decay됐나?" → 오판으로 간주
+       ↓
+  최근 M창 오판률 비교 + cooldown 충족 시에만 Active 분류기 전환
+```
+
+#### ML 로드맵 — 다음 단계
+
+ML 실험이 10개로 마무리된 현재 시점에서 세 가지 방향이 있다:
+
+**방향 A: ML4 Ensemble 커널 반영 ✅ 완료 (실험 11)**
+```
+변경: is_hot = ml1_hot && ml2_hot  (AND Ensemble)
+      hot_ipc_pairs()도 동일 적용
+효과: WM↔GFX에서 채널 생성 시점이 123000 IPC 더 늦어짐 (보수적)
+      ENCOURAGE로 ML2 thr=220 낮아져도 Bayesian<650이면 차단
+레이블: [HOT/Ens] — 시리얼 로그에서 ensemble 결정 즉시 식별 가능
+```
+
+**방향 B: ML3 공정 재평가 ✅ 완료 (실험 12)**
+```
+결과: 78% (ML2 85%보다 낮음) — 가설 기각
+핵심 발견: A 시나리오 99% 수렴 → Q-table 학습 자체는 정상 동작
+           B 스파이크 74%로 악화 → 보상 함수 결함이 원인
+           d≥20이면 무조건 ENCOURAGE 보상(+12) → spike에서 ENCOURAGE 학습
+           → DISCOURAGE로 spike 억제가 불가능한 구조
+결론: ML3는 보상 함수 재설계 없이 ML2를 대체할 수 없음
+개선 방향(미구현): reward에 rate_ema 대비 spike 판별 추가
+```
+
+**방향 C: Phase D — ELF .so / 동적 링커 재개**
+```
+현재: "리눅스쪽은 잊고 ML에서 일하자"로 보류
+ML 실험이 사실상 마무리됐으므로 Phase D 재개 검토 가능
+내용: .so 파서, PLT/GOT 설정, 동적 심볼 해석, ld-mukernel.so
+선행 조건: BETA 16(mprotect) ✅, BETA 17(Demand Paging) ✅
+```
+
+**방향 D: Phase E — Policy Engine 실전 검증**
+```
+현재: 합성 IPC 트레이스로만 검증 (bench_ml*)
+필요: 실제 Shell + ext4 + GUI 워크로드에서 Policy Engine 동작 관찰
+목표: ML4 Ensemble의 fast channel 생성 판단이 실제로 효과 있는지
+```
 
 ---
+
+
 
 ### BETA-X — 동적 IPC 최적화 (BETA 16 이전에, 우선 진행)
 
@@ -556,14 +678,31 @@ BETA-X가 "동적 패턴 감지 → 자동 최적화" 기계 자체는 증명했
 
 #### BETA-X-2 단계
 
-| Milestone | 내용 |
-|-----------|------|
-| BETA-X-2 1 | **Event Tracer (블랙박스)** — 채널 생성/소멸/부스트 등 모든 자율 결정을 고정 크기 ring buffer에 기록. 리뷰에서 "지금 당장 구현해야 할 가장 큰 기능"이라 지적된 부분. BETA-X 1~6에서 만든 채널 lifecycle 로그를 추적 가능한 이벤트로 승격 |
-| BETA-X-2 2 | **비대칭 권한 매핑** — 채널 생성 시 A는 `WRITE_ONLY`, B는 `READ_ONLY`로 페이지 매핑. 한쪽이 침해당해도 반대쪽 메모리를 직접 변조 못 함 |
-| BETA-X-2 3 | **최소 격리 매핑 검증** — 공유 페이지가 정확히 그 두 프로세스의 PML4에만 매핑되는지 확인. 다른 프로세스에게는 그 물리 페이지가 보이지 않아야 함 |
-| BETA-X-2 4 | **이상 탐지 기반 강제 회수** — BETA-X 6 decay 로직 확장. 통신 빈도가 평소 대비 비정상적으로 급증하거나 페이로드 크기가 갑자기 달라지면 의심 신호로 보고 즉시 `drop_channel` + Tracer에 기록 |
-| BETA-X-2 5 | **Switchless 직접 통신 구현** — 1~4의 안전장치 위에서, A-2의 atomic 직접 polling 방식을 실제 fast channel에 반영 (생성 시점 검증은 유지, 사용 시점은 yield_now() 없이 경량화) |
-| BETA-X-2 6 | **Safety Bounds** — Policy Engine의 자율 결정(우선순위, TIME_SLICE, 채널 생성)에 하드코딩된 상한/하한을 둬서, 오판으로 인한 thrashing(스케줄링 큐만 맴도는 현상)을 원천적으로 차단 |
+| Milestone | 내용 | 상태 |
+|-----------|------|------|
+| BETA-X-2 1 | **Event Tracer (블랙박스)** — 채널 생성/소멸/부스트 등 모든 자율 결정을 고정 크기 ring buffer에 기록. 리뷰에서 "지금 당장 구현해야 할 가장 큰 기능"이라 지적된 부분 | ✅ ring=256, 90개 이벤트 기록 확인, 오버플로 없음. 7종 이벤트(PolicyTick/PriorityBoost/HotPairDetected/ChannelCreated/PinPair/DecayWarning/ChannelDropped) 전부 동작 |
+| BETA-X-2 2 | **비대칭 권한 매핑** — 채널 생성 시 A는 `WRITE_ONLY`, B는 `READ_ONLY`로 페이지 매핑 | ✅ |
+| BETA-X-2 3 | **최소 격리 매핑 검증** — 공유 페이지가 정확히 그 두 프로세스의 PML4에만 매핑되는지 확인 | ✅ |
+| BETA-X-2 4 | **이상 탐지 기반 강제 회수** — BETA-X 6 decay 로직 확장 | ✅ |
+| BETA-X-2 5 | **Switchless 직접 통신 구현** — A-2의 atomic 직접 polling 방식을 실제 fast channel에 반영 | ✅ |
+| BETA-X-2 6 | **Safety Bounds** — Policy Engine의 자율 결정에 하드코딩된 상한/하한 (오판 thrashing 차단) | ✅ Priority cooldown, TIME_SLICE 동적 조정, 창당 채널 생성 한도 구현 |
+
+> **BETA-X-2 전체 완료.** 다음 단계는 §4 "BETA-X-2 완료 후" 섹션 참고.
+
+#### 선행 작업 — BETA 16/17을 보류 트랙에서 끌어옴
+
+BETA-X-2 2(비대칭 권한 매핑)를 구현하려면 페이지 단위로 `WRITE_ONLY`/
+`READ_ONLY`를 거는 기능이 먼저 있어야 한다. 이건 원래 "BETA 16~28 보류"
+트랙(Linux/Arch 호환용으로 미뤄둔 부분)에 있던 항목인데, BETA-X-2의
+전제 조건과 정확히 겹쳐서 두 트랙 모두에 의미 있게 먼저 완료했다.
+
+| Milestone | 내용 | 상태 |
+|-----------|------|------|
+| BETA 16 | mprotect 완전 구현 | ✅ `PTE_WRITABLE` 비트 제어로 페이지 단위 읽기/쓰기 권한 변경 |
+| BETA 17 | Demand Paging | ✅ `MAP_ANONYMOUS` lazy 할당 + `#PF`(not-present) 핸들러 |
+
+> 이 둘은 "BETA 16~28 보류" 트랙에서 미리 가져온 것이고, 나머지(Phase D~F,
+> 동적 링커~pacman)는 여전히 보류 상태다. §4 맨 아래 "BETA 16~28" 표 갱신.
 
 #### 설계 원칙 — "생성은 엄격하게, 사용은 가볍게"
 
@@ -598,16 +737,17 @@ BETA-X가 "동적 패턴 감지 → 자동 최적화" 기계 자체는 증명했
 
 ---
 
-### BETA 16~28 (보류 — Linux/Arch 완전 호환, 나중에)
+### BETA 16~28 (대부분 보류 — Linux/Arch 완전 호환, 나중에)
 
-> BETA-X 완료 후 재개. 진행 시 Phase A~F 순서를 따른다.
+> BETA 16/17은 BETA-X-2 2의 선행 조건이라 먼저 완료. 나머지는 BETA-X-2
+> 완료 후 재개. 진행 시 Phase A~F 순서를 따른다.
 
-| Phase | 내용 |
-|-------|------|
-| Phase C (BETA 16~17) | mprotect 완전 구현, Demand paging & 페이지 폴트 |
-| Phase D (BETA 19~21) | ELF .so 파서 & 재배치, 동적 링커(ld-musl 호환), musl-libc 내장 |
-| Phase E (BETA 22~24) | TCP/IP 실제 구현(smoltcp), DNS 리졸버, TLS/HTTPS |
-| Phase F (BETA 25~28) | 아카이브/압축(zstd), pacman-static 실행, glibc 호환성, 완전한 Arch 환경 |
+| Phase | 내용 | 상태 |
+|-------|------|------|
+| Phase C (BETA 16~17) | mprotect 완전 구현, Demand paging & 페이지 폴트 | ✅ 완료 (BETA-X-2 2 선행 조건으로 먼저 끌어옴) |
+| Phase D (BETA 19~21) | ELF .so 파서 & 재배치, 동적 링커(ld-musl 호환), musl-libc 내장 | ⬜ 보류 |
+| Phase E (BETA 22~24) | TCP/IP 실제 구현(smoltcp), DNS 리졸버, TLS/HTTPS | ⬜ 보류 |
+| Phase F (BETA 25~28) | 아카이브/압축(zstd), pacman-static 실행, glibc 호환성, 완전한 Arch 환경 | ⬜ 보류 |
 
 > **완료 기준:** Phase D → musl-linked 동적 바이너리 실행 / Phase E → `curl https://archlinux.org` 성공
 > / Phase F → `pacman -S neovim` 설치 후 실행 ✓
@@ -637,6 +777,29 @@ BETA-X가 "동적 패턴 감지 → 자동 최적화" 기계 자체는 증명했
 | 에뮬레이터 | QEMU x86_64 | KVM 가속, 디버깅 편의 |
 | 타겟 | x86_64 (1차), aarch64 (2차) | 개발 환경 접근성 |
 | IPC 모델 | Capability-based Message Passing | seL4 참조 |
+
+### 외부 의존성
+
+```
+ext4 파일시스템 구현: rust-fs-ext4 (외부 crate)
+  → ALPHA 8(물리 저장소)에 사용. 저널링, htree 디렉토리, 체크섬,
+    xattr까지 포함된 완성도 높은 외부 라이브러리를 가져다 씀.
+  → 직접 작성한 게 아니라 통합(integration)한 것 — 정직하게 구분할 것.
+```
+
+### 코드 규모 (직접 작성분만, 2026-06-29 기준)
+
+```
+kernel/src/  : 16,704줄
+user/        :  1,101줄
+─────────────────────
+합계         : 17,805줄  (rust-fs-ext4 외부 crate ~43,599줄 제외)
+```
+
+모듈별 분포: syscall 3,087줄(18%, Linux ABI 호환 디테일이 가장 큼) >
+process 2,524줄(14%) > policy 1,215줄(7%, Policy Engine 자체는 토론
+시간 대비 코드량은 작음 — 설계 판단이 코드량보다 무거운 작업이었다는 방증).
+`count_loc.sh`로 재현 가능 (저장소 루트에서 실행).
 
 ---
 

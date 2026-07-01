@@ -54,6 +54,18 @@ pub type CapId = u64;
 /// 전역 고유 ID 카운터
 static NEXT_CAP_ID: AtomicU64 = AtomicU64::new(1);
 
+// ── BETA-X-2 5: Switchless 도어벨 ────────────────────────────────────────────
+//
+// cap_id별 도어벨: 0=비어있음, N>0=N바이트 데이터 준비됨.
+// 송신자가 데이터를 프레임에 쓴 뒤 N을 store(Release).
+// 수신자가 load(Acquire) 후 read_va에서 데이터 복사, 다시 store(0, Release).
+// SHARED_BUFFERS 뮤텍스 없이 lock-free 접근 — 핫 경로에서 Mutex 불필요.
+const SW_SLOTS: usize = 64;
+static SW_DOORBELLS: [AtomicU64; SW_SLOTS] = [const { AtomicU64::new(0) }; SW_SLOTS];
+
+#[inline(always)]
+fn sw_slot(cap_id: CapId) -> usize { (cap_id as usize) % SW_SLOTS }
+
 /// 개별 공유 버퍼 메타데이터
 pub struct SharedBuffer {
     /// 이 버퍼의 고유 ID
@@ -291,4 +303,70 @@ pub fn verify_channel_isolation(id: CapId) -> IsolationResult {
     }
 
     IsolationResult::Ok
+}
+
+// ── BETA-X-2 5: Switchless 송수신 ────────────────────────────────────────────
+
+/// Switchless 송신: frame write_va에 데이터 기록 → 도어벨 설정.
+///
+/// - 이전 도어벨이 아직 클리어되지 않았으면 pause 스핀으로 대기 (수신자가 소비할 때까지).
+/// - 반환 시 데이터는 frame에 있고, 수신자는 도어벨 폴링으로 즉시 감지 가능.
+/// - Mutex 없음, yield 없음 → 핫 경로 zero-overhead.
+pub fn send_switchless(id: CapId, data: &[u8]) -> bool {
+    let table = SHARED_BUFFERS.lock();
+    let buf = match table.get(&id) {
+        Some(b) if b.frame_backed => b,
+        _ => return false,
+    };
+    let write_va = buf.write_va;
+    let max_len  = 4096usize;
+    let write_len = data.len().min(max_len);
+    // 이전 메시지가 소비되길 대기 (pause spin)
+    let slot = sw_slot(id);
+    drop(table); // Mutex 해제 후 스핀
+    while SW_DOORBELLS[slot].load(Ordering::Acquire) != 0 {
+        unsafe { core::arch::asm!("pause", options(nomem, nostack, preserves_flags)); }
+    }
+    // 데이터 기록 (write_va = HHDM, 쓰기 가능)
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), write_va as *mut u8, write_len);
+    }
+    // 도어벨 설정: len을 Release로 저장 (데이터 가시성 보장)
+    SW_DOORBELLS[slot].store(write_len as u64, Ordering::Release);
+    true
+}
+
+/// Switchless 수신 시도: 도어벨 확인 후 read_va에서 복사.
+///
+/// 도어벨=0이면 즉시 None 반환 (비블로킹).
+/// 도어벨 N>0이면 read_va에서 N바이트 복사 후 도어벨 클리어.
+pub fn poll_switchless(id: CapId, out: &mut [u8]) -> Option<usize> {
+    let slot = sw_slot(id);
+    let len = SW_DOORBELLS[slot].load(Ordering::Acquire);
+    if len == 0 { return None; }
+
+    let table = SHARED_BUFFERS.lock();
+    let buf = table.get(&id)?;
+    if !buf.frame_backed { return None; }
+
+    let copy_len = (len as usize).min(out.len());
+    unsafe {
+        core::ptr::copy_nonoverlapping(buf.read_va, out.as_mut_ptr(), copy_len);
+    }
+    drop(table);
+
+    // 도어벨 클리어 (수신 완료, 송신자가 다음 메시지를 쓸 수 있도록)
+    SW_DOORBELLS[slot].store(0, Ordering::Release);
+    Some(copy_len)
+}
+
+/// cap_id의 도어벨이 현재 설정되어 있는지 확인 (비블로킹 peek).
+#[inline(always)]
+pub fn doorbell_pending(id: CapId) -> bool {
+    SW_DOORBELLS[sw_slot(id)].load(Ordering::Acquire) != 0
+}
+
+/// cap_id의 도어벨 슬롯을 0으로 초기화 (채널 생성/회수 시 사용).
+pub fn reset_doorbell(id: CapId) {
+    SW_DOORBELLS[sw_slot(id)].store(0, Ordering::Release);
 }

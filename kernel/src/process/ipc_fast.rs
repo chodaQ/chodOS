@@ -56,6 +56,7 @@ pub fn ensure_channel_cap(from: Pid, to: Pid, capacity: usize) -> CapId {
     // BETA-X-2 2: 비대칭 권한 매핑 (frame_backed=true)
     // write_va(HHDM) = 쓰기 가능, read_va(RO_CHANNEL_BASE) = 읽기 전용
     let cap_id = ipc_cap::alloc_shared_frame(from, capacity);
+    ipc_cap::reset_doorbell(cap_id); // BETA-X-2 5: 이전 채널 잔여 도어벨 제거
     FAST_CHANNELS.lock().insert((from, to), cap_id);
     crate::tracer::channel_created(from as u32, to as u32, cap_id as u32, capacity);
 
@@ -110,4 +111,24 @@ pub fn drop_channel(from: Pid, to: Pid) {
 /// 현재 등록된 fast channel 수 (디버깅/리포트용).
 pub fn channel_count() -> usize {
     FAST_CHANNELS.lock().len()
+}
+
+/// `to`가 수신자인 fast channel 목록 반환 (BETA-X-2 5 switchless recv용).
+///
+/// recv()에서 자신에게 온 도어벨을 모두 확인할 때 사용.
+pub fn find_incoming_channels(to: Pid, out: &mut [(CapId, Pid)], max: usize) -> usize {
+    let table = FAST_CHANNELS.lock();
+    let mut n = 0;
+    for (&(from, t), &cap_id) in table.iter() {
+        if t == to && n < max {
+            out[n] = (cap_id, from);
+            n += 1;
+        }
+    }
+    n
+}
+
+/// 채널 생성 시 도어벨 초기화 (이전 채널의 잔여 신호 제거).
+pub fn reset_channel_doorbell(cap_id: CapId) {
+    ipc_cap::reset_doorbell(cap_id);
 }
