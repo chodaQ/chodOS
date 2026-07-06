@@ -47,27 +47,65 @@ static VMA_TABLE: Mutex<[VmaEntry; MAX_VMA]> = Mutex::new([const { VmaEntry::emp
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 
-/// VMA 등록. 같은 base가 이미 있으면 덮어씀.
-pub fn insert(base: u64, pages: usize, prot: u32, lazy: bool) {
-    let mut t = VMA_TABLE.lock();
-    for e in t.iter_mut() {
-        if e.valid && e.base == base {
-            *e = VmaEntry { base, pages, prot, lazy, valid: true };
-            return;
-        }
-    }
+/// 빈 슬롯을 찾거나 없으면 pages 수 최소 슬롯을 교체해 entry 삽입.
+fn insert_slot(t: &mut [VmaEntry; MAX_VMA], entry: VmaEntry) {
     for e in t.iter_mut() {
         if !e.valid {
-            *e = VmaEntry { base, pages, prot, lazy, valid: true };
+            *e = entry;
             return;
         }
     }
-    // 가득 참 — pages 가장 적은 슬롯 교체
     let mut min_i = 0;
     for i in 1..MAX_VMA {
         if t[i].pages < t[min_i].pages { min_i = i; }
     }
-    t[min_i] = VmaEntry { base, pages, prot, lazy, valid: true };
+    t[min_i] = entry;
+}
+
+/// VMA 등록.
+/// - 같은 base가 이미 있으면 새 VMA로 교체.
+/// - 새 VMA가 기존보다 작으면 기존의 나머지 tail을 별도 슬롯으로 보존.
+///   (MAP_FIXED mmap이 brk VMA 일부만 덮을 때 tail 페이지 손실 방지)
+pub fn insert(base: u64, pages: usize, prot: u32, lazy: bool) {
+    let new_entry = VmaEntry { base, pages, prot, lazy, valid: true };
+    let mut t = VMA_TABLE.lock();
+
+    // 같은 base의 기존 VMA 찾기
+    let mut found_idx: Option<usize> = None;
+    let mut remainder: Option<VmaEntry> = None;
+
+    for (i, e) in t.iter().enumerate() {
+        if e.valid && e.base == base {
+            found_idx = Some(i);
+            // 새 VMA가 기존보다 작으면 tail 보존
+            if pages < e.pages {
+                remainder = Some(VmaEntry {
+                    base:  base + pages as u64 * 4096,
+                    pages: e.pages - pages,
+                    prot:  e.prot,
+                    lazy:  e.lazy,
+                    valid: true,
+                });
+            }
+            break;
+        }
+    }
+
+    if let Some(i) = found_idx {
+        t[i] = new_entry;
+    } else {
+        insert_slot(&mut t, new_entry);
+    }
+
+    if let Some(rem) = remainder {
+        insert_slot(&mut t, rem);
+    }
+}
+
+/// exec 시 VMA 테이블 전체 초기화 (프로세스 교체 시 이전 VMA 잔류 방지).
+pub fn reset() {
+    let mut t = VMA_TABLE.lock();
+    for e in t.iter_mut() { e.valid = false; }
 }
 
 /// `addr`로 시작하는 VMA 제거. 해제된 항목 반환.

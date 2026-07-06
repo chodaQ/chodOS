@@ -254,7 +254,7 @@ pub fn dispatch(frame: *const u64) -> i64 {
         SYS_GETSOCKOPT  => sock::sys_getsockopt(a1, a2, a3, a4, a5),
         SYS_MMAP    => sys_mmap(a1, a2, a3, a4, a5 as i64, a6),
         SYS_MUNMAP  => sys_munmap(a1, a2),
-        SYS_BRK     => ENOMEM,
+        SYS_BRK     => crate::process::userproc::sys_brk(a1),
         // BETA 14: ioctl — 터미널/dev 지원
         SYS_IOCTL   => dev::sys_ioctl(a1, a2, a3),
         // BETA 12: truncate / rename
@@ -375,6 +375,13 @@ pub fn dispatch(frame: *const u64) -> i64 {
         SYS_CLOCK_GETTIME => sysinfo::sys_clock_gettime(a1, a2),
         SYS_CLOCK_GETRES  => sysinfo::sys_clock_getres(a1, a2),
 
+        // ── BETA 20: 동적 링커 보조 syscall ───────────────────────────────────
+        // musl의 동적 링커(ld-musl)는 이 번호를 쓰지 않고 자체적으로 처리함.
+        // MuKernel 내장 링커 테스트용 전용 번호 (407~409).
+        407 => sys_dlopen(a1, a2),   // dlopen(path_ptr, flags) → handle
+        408 => sys_dlsym(a1, a2),    // dlsym(handle, name_ptr) → fn_ptr
+        409 => sys_dlclose(a1),      // dlclose(handle) → 0
+
         _ => { crate::serial_println!("[syscall] ENOSYS nr={}", nr); ENOSYS }
     };
 
@@ -389,6 +396,11 @@ use alloc::collections::BTreeMap;
 
 /// vaddr → pages (munmap에서 해제할 페이지 수)
 static MMAP_TABLE: SpinMutex<BTreeMap<u64, usize>> = SpinMutex::new(BTreeMap::new());
+
+/// exec 시 mmap 추적 테이블 초기화 (이전 프로세스 잔류 항목 제거).
+pub fn mmap_table_reset() {
+    MMAP_TABLE.lock().clear();
+}
 
 // ── 기본 구현 함수 ────────────────────────────────────────────────────────────
 
@@ -527,11 +539,12 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i64, offset: u64) ->
         if in_existing {
             if !is_anon {
                 fill_mmap_from_fd(addr as *mut u8, pages * 4096, fd as u32, offset as usize);
+                crate::process::vma::update_prot(addr, len, prot as u32);
             } else {
-                unsafe { core::ptr::write_bytes(addr as *mut u8, 0, pages * 4096); }
+                // anon 재매핑: VMA prot을 갱신하고 lazy로 표시 (물리 페이지에 직접 접근 X)
+                // write_bytes(user_va) 대신 VMA 교체 — 커널 모드에서 미매핑 유저 VA 접근 방지
+                crate::process::vma::insert(addr, pages, prot as u32, true);
             }
-            // VMA prot 갱신 (BETA 16)
-            crate::process::vma::update_prot(addr, len, prot as u32);
             return addr as i64;
         }
         // MAP_FIXED인데 기존 영역 밖: 새로 할당
@@ -780,6 +793,50 @@ fn fmt_u64(buf: &mut [u8; 20], mut n: u64) -> usize {
 
 // ── name() ────────────────────────────────────────────────────────────────────
 
+// ── BETA 20: dlopen / dlsym / dlclose (MuKernel 전용 번호 407~409) ──────────
+
+/// dlopen(path_ptr, flags) — 동적 라이브러리 로드.
+///
+/// musl의 dlopen은 런타임에 ld-musl이 처리한다. 여기서는 커널 내장 링커
+/// 테스트용 인터페이스이므로, VFS에서 .so를 읽어 현재 프로세스 주소 공간에 로드.
+/// 반환: 로드 베이스 주소 (핸들 역할), 실패 시 0
+fn sys_dlopen(path_ptr: u64, _flags: u64) -> i64 {
+    let path = unsafe { read_cstr(path_ptr) }.unwrap_or("");
+    crate::serial_println!("[dlopen] {}", path);
+
+    let data = match crate::vfs::read_file(path) {
+        Some(d) if !d.is_empty() => d,
+        _                         => { return 0; }
+    };
+
+    let cr3       = crate::process::userproc::current_cr3();
+    let slot_base = crate::process::userproc::alloc_mmap_vaddr(
+        (crate::dynlink::SO_SLOT_SIZE / 4096) as usize
+    );
+
+    match crate::dynlink::load_so(path, &data, cr3, slot_base) {
+        Some(lib) => lib.load_base as i64,
+        None      => 0,
+    }
+}
+
+/// dlsym(handle, name_ptr) — 심볼 주소 조회.
+///
+/// handle = load_base, name = 심볼 이름.
+/// 현재 구현: handle 라이브러리에서만 검색 (크로스-lib 해석은 미지원).
+fn sys_dlsym(handle: u64, name_ptr: u64) -> i64 {
+    let name = unsafe { read_cstr(name_ptr) }.unwrap_or("");
+    crate::serial_println!("[dlsym] handle={:#x} name={}", handle, name);
+    // 간단 구현: 로드 베이스와 심볼 이름을 알아도 오프셋을 알 수 없음.
+    // Phase D 완료 후 SharedLib 레지스트리를 통해 구현 예정.
+    0 // ENOSYS 대신 0 (NULL fn ptr)
+}
+
+/// dlclose(handle) — 동적 라이브러리 해제.
+///
+/// 현재 구현: no-op (라이브러리 레지스트리 미구현).
+fn sys_dlclose(_handle: u64) -> i64 { 0 }
+
 pub fn name(nr: u64) -> &'static str {
     match nr {
         0   => "read",          1   => "write",         2   => "open",
@@ -816,7 +873,8 @@ pub fn name(nr: u64) -> &'static str {
         302 => "prlimit64",     400 => "pkg_list",       401 => "pkg_getargs",
         402 => "ext4_read",     403 => "pkg_info",
         404 => "pkg_install",   405 => "pkg_remove",
-        406 => "pkg_installed", 435 => "clone3",
+        406 => "pkg_installed", 407 => "dlopen", 408 => "dlsym", 409 => "dlclose",
+        435 => "clone3",
         22  => "pipe",          23  => "select",
         41  => "socket",        42  => "connect",        43  => "accept",
         44  => "sendto",        45  => "recvfrom",       46  => "sendmsg",

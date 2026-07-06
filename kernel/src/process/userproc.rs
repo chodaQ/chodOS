@@ -63,6 +63,9 @@ pub struct UserProc {
     pub cwd:              String, // 현재 작업 디렉토리
     // BETA 15: mmap 가상 주소 범프 포인터
     pub mmap_next:        u64,   // 다음 mmap 할당 시작 주소
+    // BETA 21: brk(2) 힙 포인터 (초기값 = ELF BSS end, exec_replace에서 설정)
+    pub brk_base:         u64,   // 힙 시작 주소 (불변)
+    pub brk_cur:          u64,   // 현재 brk (= sbrk 현재 끝)
 }
 
 impl UserProc {
@@ -129,6 +132,8 @@ pub fn register(pid: u64, parent_pid: u64, user_cr3: u64) {
                 child_tid_ptr:   0,
                 cwd:             String::from("/"),
                 mmap_next:       0x4000_0000, // BETA 15: mmap 시작 주소 (1GB)
+                brk_base:        0,           // exec_replace에서 ELF BSS end로 설정
+                brk_cur:         0,
             });
             unsafe { CURRENT_UPROC = i; }
             tss_update(top);
@@ -169,6 +174,41 @@ pub fn set_cwd(path: &str) {
     let cur = unsafe { CURRENT_UPROC };
     if let Some(ref mut p) = table()[cur] {
         p.cwd = String::from(path);
+    }
+}
+
+/// BETA 21: exec 후 brk 기준점 설정 (ELF BSS end 기준).
+/// load_exec 완료 후 exec_replace에서 호출.
+pub fn set_brk_base(end: u64) {
+    let cur = unsafe { CURRENT_UPROC };
+    if let Some(ref mut p) = table()[cur] {
+        // 4KB 정렬: ELF BSS end를 페이지 경계로 올림
+        let aligned = (end + 0xFFF) & !0xFFF;
+        p.brk_base = aligned;
+        p.brk_cur  = aligned;
+    }
+}
+
+/// BETA 21: brk(2) 구현.
+/// addr=0 → 현재 brk 반환.
+/// addr>brk_base → brk 확장 (새 페이지 demand 매핑) 후 새 brk 반환.
+/// addr<brk_base → 실패, 현재 brk 반환 (musl 동작과 일치).
+pub fn sys_brk(addr: u64) -> i64 {
+    let cur = unsafe { CURRENT_UPROC };
+    if let Some(ref mut p) = table()[cur] {
+        if addr == 0 || addr < p.brk_base {
+            return p.brk_cur as i64;
+        }
+        let new_brk = (addr + 0xFFF) & !0xFFF;
+        // 새 브레이크 영역을 demand-paging VMA로 등록 (RW)
+        if new_brk > p.brk_cur {
+            let pages = ((new_brk - p.brk_cur) as usize + 4095) / 4096;
+            crate::process::vma::insert(p.brk_cur, pages, 0x3 /* RW */, true /* lazy */);
+        }
+        p.brk_cur = new_brk;
+        new_brk as i64
+    } else {
+        -12  // ENOMEM
     }
 }
 
@@ -251,6 +291,16 @@ pub fn fork_current(frame_rsp: u64) -> u64 {
                     let t2 = table();
                     let c2 = unsafe { CURRENT_UPROC };
                     t2[c2].as_ref().map(|p| p.mmap_next).unwrap_or(0x4000_0000)
+                },
+                brk_base: {
+                    let t2 = table();
+                    let c2 = unsafe { CURRENT_UPROC };
+                    t2[c2].as_ref().map(|p| p.brk_base).unwrap_or(0)
+                },
+                brk_cur: {
+                    let t2 = table();
+                    let c2 = unsafe { CURRENT_UPROC };
+                    t2[c2].as_ref().map(|p| p.brk_cur).unwrap_or(0)
                 },
             });
             break;
@@ -348,6 +398,16 @@ pub fn clone_thread(flags: u64, child_stack: u64, parent_tid_vaddr: u64,
                     let t2 = table();
                     let c2 = unsafe { CURRENT_UPROC };
                     t2[c2].as_ref().map(|p| p.mmap_next).unwrap_or(0x4000_0000)
+                },
+                brk_base: {
+                    let t2 = table();
+                    let c2 = unsafe { CURRENT_UPROC };
+                    t2[c2].as_ref().map(|p| p.brk_base).unwrap_or(0)
+                },
+                brk_cur: {
+                    let t2 = table();
+                    let c2 = unsafe { CURRENT_UPROC };
+                    t2[c2].as_ref().map(|p| p.brk_cur).unwrap_or(0)
                 },
             });
             break;
@@ -481,12 +541,65 @@ pub fn try_wake_parent(exit_code: i32) {
 }
 
 /// exec in forked child: 자식의 주소 공간을 새 ELF로 교체.
+///
+/// - ET_EXEC (정적 실행 파일): 기존 load_elf_into_space 경로
+/// - ET_DYN (PIE / PT_INTERP 있음): DynLinker 경로 → load_dyn_exec
 pub fn exec_replace(elf_data: &[u8]) -> ! {
     let t = table();
     let cur = unsafe { CURRENT_UPROC };
 
-    let (new_cr3, new_entry, new_user_rsp) = unsafe {
-        crate::paging::load_elf_into_space(elf_data)
+    // exec 전 이전 프로세스가 남긴 VMA / mmap 추적 상태를 초기화
+    crate::process::vma::reset();
+    crate::syscall::mmap_table_reset();
+
+    // VFS 라이브러리 제공자 — tmpfs 우선, 없으면 ext4에서 읽기
+    let lib_provider = |name: &str| -> Option<alloc::vec::Vec<u8>> {
+        let path = alloc::format!("/lib/{}", name);
+        crate::vfs::read_file(&path)
+            .or_else(|| crate::vfs::ext4_read_file(&path))
+    };
+
+    // PT_INTERP 존재 (동적 링킹 필요) → DynLinker 경로
+    // ET_EXEC + PT_INTERP (일반 동적 실행 파일)과 ET_DYN (PIE) 모두 처리
+    let needs_dynlink = crate::elf::Elf64::parse(elf_data)
+        .map(|e| e.interp().is_some())
+        .unwrap_or(false);
+
+    let (new_cr3, new_entry, new_user_rsp) = if needs_dynlink {
+        // ── DynLinker 단일 단계 경로 (PIE / 동적 실행 파일) ─────────────────
+        // 1. 빈 PML4 생성 (커널 상위 절반 공유)
+        let new_cr3 = unsafe { crate::paging::alloc_user_pml4() };
+
+        // 2. DynLinker로 실행 파일 + 인터프리터 + 의존 라이브러리 모두 로드 + 재배치
+        let mut dl = crate::dynlink::DynLinker::new(new_cr3);
+        let entry = dl.load_exec(elf_data, lib_provider)
+            .unwrap_or(0x0000_0000_0040_0000); // fallback: EXEC_LOAD_BASE
+        dl.resolve_all();
+
+        // 3. aux vector 포함 유저 스택 셋업
+        // AT_BASE = 인터프리터 로드 기준 주소 (ld-musl이 로드된 곳)
+        //   ET_DYN: exec_load_base (EXEC_LOAD_BASE)가 아니라 interp_entry에서 역산
+        //   ET_EXEC with interp: INTERP_LOAD_BASE
+        // AT_ENTRY = exec의 원래 진입점 (인터프리터가 최종적으로 점프할 곳)
+        let at_base = if dl.interp_entry != 0 {
+            crate::dynlink::INTERP_LOAD_BASE
+        } else {
+            dl.exec_load_base
+        };
+        // brk base = exec ELF 의 BSS end (가장 높은 PT_LOAD vaddr+memsz, 4KB 정렬)
+        let exec_bss_end = dl.exec_vaddr_end;
+        set_brk_base(exec_bss_end);
+        let user_rsp = unsafe {
+            crate::paging::setup_user_stack(
+                new_cr3,
+                dl.exec_phdr_va, dl.exec_phent, dl.exec_phnum,
+                at_base, dl.exec_entry,  // AT_BASE, AT_ENTRY (exec 진입점)
+            )
+        };
+        (new_cr3, entry, user_rsp)
+    } else {
+        // ── 정적 실행 파일 (ET_EXEC) ─────────────────────────────────────────
+        unsafe { crate::paging::load_elf_into_space(elf_data) }
     };
 
     let (ffrsp, ktop) = {

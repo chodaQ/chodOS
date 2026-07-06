@@ -65,6 +65,14 @@ pub static PACKAGES: &[Package] = &[
         deps:    &[],
         elf:     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../build/musl_uname.elf")),
     },
+    // BETA 21: musl-linked 동적 바이너리 — DynLinker + .so 재배치 검증용
+    Package {
+        name:    "hello_dyn",
+        version: "1.0.0",
+        desc:    "musl-linked dynamic hello (BETA 21 dynlink test)",
+        deps:    &[],
+        elf:     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../build/dyn_hello.elf")),
+    },
 ];
 
 // 설치 상태 비트맵: bit i = PACKAGES[i]가 설치됨

@@ -15,8 +15,29 @@
 //! - `TIME_SLICE`: `AtomicU64` → lock-free read/write
 //! - `on_switch()`: 힙 할당 없음, 고정 배열, 잠금 없음
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::process::{Pid, Priority};
+
+// ── PE-4: Policy Engine on/off 토글 (A/B 벤치마크용) ──────────────────────────
+//
+// false로 설정하면 adapt_and_report()가 관측/로깅은 계속하되
+// 실제 스케줄러 조작(우선순위 변경, TIME_SLICE 조정, hot-pair 채널 생성,
+// core affinity 고정, 메모리/키보드 부스트)을 모두 건너뛴다.
+// "off" 상태는 BETA 이전의 정적 스케줄러(고정 slice=3, 항상 Normal)와 동등.
+pub static POLICY_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// PE-4: Policy Engine 활성/비활성 전환.
+pub fn set_enabled(enabled: bool) {
+    POLICY_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// PE-4: 현재 활성 상태 조회 (scheduler.rs의 keyboard_boost 등에서도 참조).
+pub fn is_enabled() -> bool {
+    POLICY_ENABLED.load(Ordering::Relaxed)
+}
+
+/// off 상태에서 사용하는 고정 TIME_SLICE (BETA 이전 정적 스케줄러 기본값).
+const BASELINE_TIME_SLICE: u64 = 3;
 
 /// 스케줄러(timer_preempt)가 읽는 현재 타임슬라이스 (틱 단위).
 ///
@@ -228,6 +249,18 @@ const PRIORITY_COOLDOWN_WINDOWS: u8 = 3;
 /// TIME_SLICE 허용 범위 (틱 단위)
 const TIME_SLICE_MIN: u64 = 1;
 const TIME_SLICE_MAX: u64 = 4;
+
+// ── ST-1: 평가 주기(report_interval) 동적화 ──────────────────────────────────
+/// report_interval 허용 범위 (틱 단위) — Safety Bounds
+const REPORT_INTERVAL_MIN: u64 = 8;
+const REPORT_INTERVAL_MAX: u64 = 72;
+/// PE-4 off 상태 및 초기 기준값 (BETA-X-2까지의 고정 36틱과 동일)
+const REPORT_INTERVAL_BASELINE: u64 = 36;
+/// 창당 스위치율(×10 고정소수점, 예: 15 = 1.5회/틱) 이 이상이면 "부하 높음"
+/// → 짧은 주기(REPORT_INTERVAL_MIN)로 더 자주 관찰
+const SWITCH_RATE_HIGH_X10: u64 = 15;
+/// 이 이하이면 "부하 낮음" → 긴 주기(REPORT_INTERVAL_MAX)로 오버헤드 절감
+const SWITCH_RATE_LOW_X10: u64 = 3;
 /// 한 리포트 창당 최대 신규 채널 생성 수
 const MAX_CHANNELS_PER_WINDOW: u8 = 2;
 /// 채널 회수(이상/decay) 후 재생성 금지 기간 (틱 단위, ≈2창)
@@ -264,6 +297,8 @@ pub struct PolicyEngine {
     rl_epsilon: u8,
     /// xorshift64 RNG 상태 (0이면 1로 초기화)
     rl_rng: u64,
+    /// ST-1: 이번 창에서 발생한 컨텍스트 스위치 수 (창 시작마다 0 리셋)
+    switches_this_window: u64,
 }
 
 impl PolicyEngine {
@@ -282,6 +317,7 @@ impl PolicyEngine {
             rl_q:       [[10, 0, 0, 0]; RL_N_STATES], // NOOP 약한 bias
             rl_epsilon: RL_EPSILON_INIT,
             rl_rng:     0x123456789abcdef0,
+            switches_this_window: 0,
         }
     }
 
@@ -359,6 +395,9 @@ impl PolicyEngine {
     /// 컨텍스트 스위치 이벤트 — ISR 컨텍스트에서 호출됨 (힙 할당 없음).
     pub fn on_switch(&mut self, from: Pid, to: Pid, tick: u64) {
         self.total_ticks = tick;
+
+        // ST-1: 컨텍스트 스위치 빈도 관찰 (평가 주기 동적화의 관찰 신호)
+        self.switches_this_window += 1;
 
         // from 프로세스 실행 시간 누적
         if let Some(i) = self.find_slot(from) {
@@ -523,6 +562,38 @@ impl PolicyEngine {
         let old_slice = TIME_SLICE.load(Ordering::Relaxed);
         let mut max_pct: u64 = 0;
 
+        // ── ST-1: 평가 주기(report_interval) 동적화 ────────────────────────────
+        // "관찰 → 판단 → 조정 → 검증": 방금 끝난 창의 컨텍스트 스위치 빈도를 보고
+        // 다음 평가 주기를 조정한다. 스위치가 잦음(부하 높음) → 8틱로 짧게 해서
+        // 더 자주 반응, 스위치가 드묾(부하 낮음) → 72틱로 늘려 오버헤드 절감.
+        // PE-4와 동일한 패턴: off 상태에서는 BETA-X-2 이전 고정값(36틱) 유지.
+        let switches = self.switches_this_window;
+        self.switches_this_window = 0;
+        let switch_rate_x10 = (switches * 10) / window; // 창당 평균 스위치 수 ×10
+
+        let old_interval = self.report_interval;
+        let new_interval: u64 = if is_enabled() {
+            let raw = if switch_rate_x10 >= SWITCH_RATE_HIGH_X10 {
+                REPORT_INTERVAL_MIN
+            } else if switch_rate_x10 <= SWITCH_RATE_LOW_X10 {
+                REPORT_INTERVAL_MAX
+            } else {
+                REPORT_INTERVAL_BASELINE
+            };
+            raw.max(REPORT_INTERVAL_MIN).min(REPORT_INTERVAL_MAX) // Safety Bounds
+        } else {
+            REPORT_INTERVAL_BASELINE
+        };
+        if new_interval != old_interval {
+            crate::tracer::param_tuned(1, old_interval, new_interval);
+            crate::serial_println!(
+                "[policy-ST1] 평가 주기 조정: {}→{}틱 (스위치율={}.{}/틱, 전체스위치={})",
+                old_interval, new_interval,
+                switch_rate_x10 / 10, switch_rate_x10 % 10, switches,
+            );
+        }
+        self.report_interval = new_interval;
+
         crate::serial_println!(
             "[policy] ── CPU 리포트 (tick={}, slice={}틱) ──", tick, old_slice
         );
@@ -559,36 +630,45 @@ impl PolicyEngine {
             };
 
             // BETA-X-2 6: 우선순위 쿨다운 — 잦은 변경으로 인한 thrashing 방지
+            // PE-4: Policy Engine off면 관측/계산만 하고 실제 적용은 건너뜀
             let old_pri = crate::process::scheduler::get_priority(pid);
-            if old_pri != new_pri {
+            if is_enabled() {
+                if old_pri != new_pri {
+                    if self.stats[i].pri_cooldown > 0 {
+                        crate::tracer::safety_bound(
+                            pid as u32, 0,
+                            0x10 | self.stats[i].pri_cooldown as u64,
+                        );
+                        crate::serial_println!(
+                            "[policy-X6] pid{} 우선순위 변경 차단 (쿨다운={}/{}창 남음)",
+                            pid, self.stats[i].pri_cooldown, PRIORITY_COOLDOWN_WINDOWS,
+                        );
+                    } else {
+                        crate::process::scheduler::set_priority(pid, new_pri);
+                        crate::tracer::priority_boost(pid as u32, old_pri as u8, new_pri as u8);
+                        self.stats[i].pri_cooldown = PRIORITY_COOLDOWN_WINDOWS;
+                    }
+                }
+                // 쿨다운 차감 (창마다 1 감소)
                 if self.stats[i].pri_cooldown > 0 {
-                    crate::tracer::safety_bound(
-                        pid as u32, 0,
-                        0x10 | self.stats[i].pri_cooldown as u64,
-                    );
-                    crate::serial_println!(
-                        "[policy-X6] pid{} 우선순위 변경 차단 (쿨다운={}/{}창 남음)",
-                        pid, self.stats[i].pri_cooldown, PRIORITY_COOLDOWN_WINDOWS,
-                    );
-                } else {
-                    crate::process::scheduler::set_priority(pid, new_pri);
-                    crate::tracer::priority_boost(pid as u32, old_pri as u8, new_pri as u8);
-                    self.stats[i].pri_cooldown = PRIORITY_COOLDOWN_WINDOWS;
+                    self.stats[i].pri_cooldown -= 1;
                 }
             }
-            // 쿨다운 차감 (창마다 1 감소)
-            if self.stats[i].pri_cooldown > 0 {
-                self.stats[i].pri_cooldown -= 1;
-            }
+
+            // PE-3: 코어 특성 감지 — 우선순위 기반 P-core/E-core 권고
+            // QEMU TCG는 Hybrid CPUID를 지원하지 않아 실제 배치 효과는
+            // 관측되지 않지만(detect_core_type()이 항상 Unknown), 구조는 완성.
+            let recommended_core = crate::smp::recommend_core_for_priority(new_pri);
 
             crate::serial_println!(
-                "[policy]   pid={} {:12}: 최근{:3}% 누적{:3}%  vol_ema={:4}‰  → {}",
+                "[policy]   pid={} {:12}: 최근{:3}% 누적{:3}%  vol_ema={:4}‰  → {} (코어권고={})",
                 pid,
                 pid_name(pid),
                 recent_pct,
                 total_pct,
                 new_ema,
                 new_pri.name(),
+                recommended_core.name(),
             );
 
             if recent_pct > max_pct { max_pct = recent_pct; }
@@ -596,14 +676,20 @@ impl PolicyEngine {
         }
 
         // BETA-X-2 6: TIME_SLICE 동적 조정 — 안전 한도 [TIME_SLICE_MIN, TIME_SLICE_MAX] 적용
-        let raw_slice: u64 = if max_pct >= 70 { 1 } else if max_pct >= 40 { 2 } else { 3 };
-        let new_slice: u64 = raw_slice.max(TIME_SLICE_MIN).min(TIME_SLICE_MAX);
+        // PE-4: off 상태에서는 BASELINE_TIME_SLICE로 고정 (BETA 이전 정적 스케줄러 동등)
+        let new_slice: u64 = if is_enabled() {
+            let raw_slice: u64 = if max_pct >= 70 { 1 } else if max_pct >= 40 { 2 } else { 3 };
+            raw_slice.max(TIME_SLICE_MIN).min(TIME_SLICE_MAX)
+        } else {
+            BASELINE_TIME_SLICE
+        };
         if new_slice != old_slice {
             TIME_SLICE.store(new_slice, Ordering::Relaxed);
         }
         crate::serial_println!(
-            "[policy]    slice={}틱  (최고 점유 {}%, 범위={}-{}틱)",
+            "[policy]    slice={}틱  (최고 점유 {}%, 범위={}-{}틱, PE={})",
             new_slice, max_pct, TIME_SLICE_MIN, TIME_SLICE_MAX,
+            if is_enabled() { "ON" } else { "OFF" },
         );
 
         // ML 2 + ML 1 + BETA-X 1: IPC 핫 쌍 top-3 리포트
@@ -680,7 +766,8 @@ impl PolicyEngine {
                 );
 
                 // ML 2 + ML 3: 조정된 임계값 or PIN_PUSH이면 fast channel 생성
-                if is_hot {
+                // PE-4: Policy Engine off면 채널 생성/코어 고정 등 실제 조작 생략
+                if is_hot && is_enabled() {
                     crate::tracer::hot_pair_detected(from as u32, to as u32, count);
 
                     // BETA-X-2 6: 채널 생성 안전 한도 확인
@@ -772,7 +859,8 @@ impl PolicyEngine {
                     "[policy-M]   pid={} {:12}: mmap+{}회 fault+{}회 {}",
                     pid, pid_name(pid), mmap_delta, fault_delta, level,
                 );
-                if mmap_delta >= MEM_HOT_THRESHOLD {
+                // PE-4: Policy Engine off면 우선순위 부스트 생략 (관측만)
+                if mmap_delta >= MEM_HOT_THRESHOLD && is_enabled() {
                     let old_m = crate::process::scheduler::get_priority(pid);
                     crate::process::scheduler::set_priority(pid, crate::process::Priority::High);
                     crate::tracer::priority_boost(pid as u32, old_m as u8, crate::process::Priority::High as u8);

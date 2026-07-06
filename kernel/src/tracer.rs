@@ -21,6 +21,7 @@
 //! | DecayWarning      | from  | to    | 0     | cold<<16|max_cold  |
 //! | PolicyTick        | 0     | 0     | 0     | tick               |
 //! | Anomaly           | from  | to    | cap   | reason code        |
+//! | ParamTuned        | param_id | 0  | 0     | old_val<<32|new_val|
 
 use spin::Mutex;
 
@@ -42,6 +43,7 @@ pub enum EventKind {
     PolicyTick      = 7,
     Anomaly         = 8,
     SafetyBound     = 9, // BETA-X-2 6: 안전 한도 차단
+    ParamTuned      = 10, // ST-1: Self-Tuning Policy Engine 파라미터 변경
 }
 
 impl EventKind {
@@ -56,6 +58,7 @@ impl EventKind {
             Self::PolicyTick      => "PolicyTick     ",
             Self::Anomaly         => "Anomaly        ",
             Self::SafetyBound     => "SafetyBound    ",
+            Self::ParamTuned      => "ParamTuned     ",
         }
     }
 }
@@ -200,6 +203,20 @@ pub fn anomaly(from: u32, to: u32, cap: u32, reason: u64) {
     });
 }
 
+/// ST-1: Self-Tuning Policy Engine이 파라미터를 조정할 때마다 기록.
+///
+/// "왜 갑자기 이렇게 동작하지?"를 사후 추적하기 위함 (ARCHITECTURE.md
+/// Self-Tuning 트랙 설계 원칙: 모든 조정은 Event Tracer에 기록).
+///
+/// param_id: 1=report_interval (추후 2=ema_alpha, 3=time_slice_range 등 확장)
+pub fn param_tuned(param_id: u32, old: u64, new: u64) {
+    record(TraceEvent {
+        ts: rdtsc(), kind: EventKind::ParamTuned,
+        pid_a: param_id, pid_b: 0, cap: 0,
+        extra: (old << 32) | (new & 0xFFFF_FFFF),
+    });
+}
+
 // ── 덤프 ─────────────────────────────────────────────────────────────────────
 
 /// 스냅샷 버퍼 (dump()용 정적 배열 — 스택 오버플로 방지)
@@ -300,5 +317,13 @@ fn print_event(seq: usize, ev: &TraceEvent) {
             "[tracer]  {:>3} {:016x}  {}  pid{}↔pid{}  reason={:#x}",
             seq, ev.ts, ev.kind.label(), ev.pid_a, ev.pid_b, ev.extra,
         ),
+        EventKind::ParamTuned => {
+            let old = (ev.extra >> 32) as u32;
+            let new = ev.extra as u32;
+            crate::serial_println!(
+                "[tracer]  {:>3} {:016x}  {}  param#{}  {}→{}",
+                seq, ev.ts, ev.kind.label(), ev.pid_a, old, new,
+            );
+        },
     }
 }

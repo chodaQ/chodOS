@@ -102,13 +102,34 @@ pub extern "C" fn exception_handler(frame: &ExceptionFrame) {
         crate::signal::raise_signal(crate::signal::SIGBUS);
         crate::syscall::sys_exit_impl(128 + crate::signal::SIGBUS as u64);
     }
+    if is_user && vec == 6 {
+        // #UD in user space: SIGILL (+ 디버그용 CR4 덤프)
+        let cr4: u64;
+        unsafe {
+            core::arch::asm!("mov {}, cr4", out(reg) cr4,
+                options(nomem, nostack, preserves_flags));
+        }
+        crate::serial_println!(
+            "\n[signal] user #UD RIP={:#x}  CR4={:#x}  (OSFXSR={} OSXMMEXCPT={}) → SIGILL",
+            frame.rip, cr4, (cr4 >> 9) & 1, (cr4 >> 10) & 1,
+        );
+        crate::signal::raise_signal(crate::signal::SIGILL);
+        crate::syscall::sys_exit_impl(128 + crate::signal::SIGILL as u64);
+    }
 
+    let cr4: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr4", out(reg) cr4,
+            options(nomem, nostack, preserves_flags));
+    }
     crate::serial_println!("\n!!! CPU EXCEPTION !!!");
     crate::serial_println!("  vec={} ({})", vec, exception_name(vec));
     crate::serial_println!("  error_code = {:#x}", ec);
     crate::serial_println!("  RIP    = {:#018x}", frame.rip);
     crate::serial_println!("  CS     = {:#x}", frame.cs);
     crate::serial_println!("  RFLAGS = {:#x}", frame.rflags);
+    crate::serial_println!("  CR4    = {:#018x}  (OSFXSR={} OSXMMEXCPT={})",
+        cr4, (cr4 >> 9) & 1, (cr4 >> 10) & 1);
     if vec == 14 {
         crate::serial_println!("  CR2    = {:#018x}  (폴트 주소)", cr2);
         crate::serial_println!("  PF flags: P={} W={} U={} I={}",
@@ -295,19 +316,24 @@ pub extern "C" fn after_user_demo() -> ! {
             unsafe { crate::paging::enter_elf(crate::ELF_TEST); }
         }
         1 => {
-            // ALPHA 14 완료 → ALPHA 15 셸 첫 진입
+            // ALPHA 14 완료 → BETA 21: hello_dyn 동적 링킹 테스트
             crate::serial_println!(
                 "[ring3] ELF test exited: code={} ({} syscalls total)", code, calls
             );
-            crate::serial_println!("--- ALPHA 14 complete ---\n");
+            crate::serial_println!("--- ALPHA 14 complete ---");
             crate::serial_println!("===========================================");
-            crate::serial_println!("  ALPHA 15 / 16: Shell + Package Manager");
-            crate::serial_println!("  (mukg list/install/run 으로 패키지 실행)");
+            crate::serial_println!("  BETA 21: musl-linked 동적 바이너리 실행 테스트");
             crate::serial_println!("===========================================");
-            crate::serial_println!("[shell] loading mushell ({} bytes)...",
-                crate::MUSHELL_ELF.len());
-            crate::syscall::fd::init(); // BETA 4: fd 테이블 초기화
-            unsafe { crate::paging::enter_elf(crate::MUSHELL_ELF); }
+            let hello_dyn_pkg = crate::pkg::PACKAGES.iter().find(|p| p.name == "hello_dyn");
+            if let Some(pkg) = hello_dyn_pkg {
+                crate::serial_println!("[beta21] launching hello_dyn ({} bytes)...", pkg.elf.len());
+                crate::syscall::fd::init();
+                unsafe { crate::paging::enter_elf(pkg.elf); }
+            } else {
+                crate::serial_println!("[beta21] hello_dyn 패키지 없음, mushell 진입");
+                crate::syscall::fd::init();
+                unsafe { crate::paging::enter_elf(crate::MUSHELL_ELF); }
+            }
         }
         _ => {
             // Phase 2+: mushell 또는 패키지 종료

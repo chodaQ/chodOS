@@ -18,7 +18,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 use limine::mp::{MpGotoFunction, MpInfo, MpRespData};
 
-use crate::process::Pid;
+use crate::process::{Pid, Priority};
 
 // ── 상수 ─────────────────────────────────────────────────────────────────────
 
@@ -130,6 +130,19 @@ pub fn init(mp_resp: &MpRespData) {
         "[smp] init done — BSP + {} AP(s) = {} core(s) total",
         online, online + 1
     );
+
+    // PE-3: BSP 코어 특성 감지 (CPUID leaf 0x1A)
+    let hybrid = cpu_is_hybrid();
+    let core_type = detect_core_type();
+    crate::serial_println!(
+        "[smp-PE3] BSP core type: {} (hybrid_cpu={})",
+        core_type.name(), hybrid,
+    );
+    if !hybrid {
+        crate::serial_println!(
+            "[smp-PE3]   (QEMU/비-hybrid CPU — P-core/E-core 구분 미지원, 구조만 검증됨)"
+        );
+    }
 }
 
 /// A-2: AP에 작업 함수 할당.
@@ -181,6 +194,85 @@ pub fn current_cpu_id() -> u8 {
         );
     }
     ((ebx_val >> 24) & 0xFF) as u8
+}
+
+// ── PE-3: 코어 특성 감지 (Intel P-core/E-core) ────────────────────────────────
+
+/// 코어 종류 — Intel Hybrid 아키텍처(Alder Lake+) 기준.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum CoreType {
+    /// Performance core (Core) — 고성능, IO바운드/지연 민감 작업에 적합
+    PCore,
+    /// Efficiency core (Atom) — 저전력, CPU바운드 배치 작업에 적합
+    ECore,
+    /// Hybrid 미지원 CPU (QEMU TCG 포함) — 모든 코어 동일 취급
+    Unknown,
+}
+
+impl CoreType {
+    pub fn name(self) -> &'static str {
+        match self {
+            CoreType::PCore   => "P-core",
+            CoreType::ECore   => "E-core",
+            CoreType::Unknown => "동일(비-hybrid)",
+        }
+    }
+}
+
+/// CPUID.07H.0:EDX 비트 15 — Hybrid 아키텍처 지원 여부.
+fn cpu_is_hybrid() -> bool {
+    let edx: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "pop rbx",
+            inout("eax") 7u32 => _,
+            inout("ecx") 0u32 => _,
+            out("edx") edx,
+        );
+    }
+    (edx >> 15) & 1 == 1
+}
+
+/// CPUID.1AH.0:EAX 비트 [31:24] — Native Model ID / Core Type.
+/// 0x40 = Atom(E-core), 0x20 = Core(P-core).
+///
+/// 현재 실행 중인 논리 코어 기준으로 판정하므로, 호출한 코어에서
+/// 즉시 읽어야 한다(마이그레이션 시 재호출 필요).
+pub fn detect_core_type() -> CoreType {
+    if !cpu_is_hybrid() {
+        return CoreType::Unknown;
+    }
+    let eax: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "pop rbx",
+            inout("eax") 0x1Au32 => eax,
+            out("ecx") _,
+            out("edx") _,
+        );
+    }
+    match (eax >> 24) & 0xFF {
+        0x40 => CoreType::ECore,
+        0x20 => CoreType::PCore,
+        _    => CoreType::Unknown,
+    }
+}
+
+/// 우선순위 → 권고 코어 타입.
+///
+/// I/O바운드(High)  → P-core (지연 민감, 빠른 응답)
+/// CPU바운드(Low)   → E-core (처리량 위주, 저전력)
+/// Normal          → 무관(Unknown 취급, 스케줄러 자유 배치)
+pub fn recommend_core_for_priority(pri: Priority) -> CoreType {
+    match pri {
+        Priority::High => CoreType::PCore,
+        Priority::Low  => CoreType::ECore,
+        _              => CoreType::Unknown,
+    }
 }
 
 /// 특정 PID를 지정 코어에 고정.

@@ -164,6 +164,7 @@ impl Scheduler {
     pub fn do_preempt(&mut self, current_rsp: u64, is_voluntary: bool) -> u64 {
         let cur = self.current;
         let from_pid = self.processes[cur].pid;
+        SWITCH_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         // ALPHA 4: 스케줄링 행동 분류
         if is_voluntary {
@@ -322,8 +323,18 @@ pub fn voluntary_preempt(current_rsp: u64) -> u64 {
     unsafe { get().do_preempt(current_rsp, true) }
 }
 
+/// PE-4: 전체 컨텍스트 스위치 횟수 (A/B 벤치마크 지표).
+/// on/off 무관하게 항상 집계 — 순수 관측이므로 오버헤드 없음.
+pub static SWITCH_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn switch_count() -> u64 {
+    SWITCH_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// 키보드 입력 부스트 (ALPHA 6)
+/// PE-4: Policy Engine off 상태에서는 부스트도 생략 (A/B 비교 대상 신호)
 pub fn keyboard_boost() {
+    if !crate::policy::is_enabled() { return; }
     unsafe { get().keyboard_boost(); }
 }
 

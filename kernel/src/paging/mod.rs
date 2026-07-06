@@ -182,6 +182,23 @@ pub fn init() {
 
         KERNEL_CR3 = new_cr3;
 
+        // SSE/XMM 활성화 — 유저 공간의 SSE2 명령(MOVQ xmm 등)이 #UD를 내지 않으려면
+        // CR4.OSFXSR(bit9) + CR4.OSXMMEXCPT(bit10)을 세트해야 함.
+        // CR0.EM(bit2)=0: FPU 에뮬레이션 끄기 (1이면 모든 FP/SSE → #UD)
+        // CR0.MP(bit1)=1: FWAIT/WAIT 시 CR0.TS 체크 활성 (표준 설정)
+        {
+            let mut cr4: u64;
+            asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+            cr4 |= (1 << 9) | (1 << 10); // OSFXSR | OSXMMEXCPT
+            asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
+
+            let mut cr0: u64;
+            asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+            cr0 &= !(1u64 << 2); // EM = 0
+            cr0 |=   1u64 << 1;  // MP = 1
+            asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack, preserves_flags));
+        }
+
         // TSS.RSP0 설정: ring3에서 인터럽트 발생 시 CPU가 사용할 스택
         // 스택은 높은 주소에서 낮은 방향으로 성장하므로 버퍼 최상단 설정
         let rsp0 = core::ptr::addr_of!(USER_KERNEL_STACK).cast::<u8>().add(8192) as u64;
@@ -189,7 +206,7 @@ pub fn init() {
         crate::interrupts::init_syscall(rsp0);
     }
 
-    crate::serial_println!("[paging] Kernel PML4 built and CR3 switched.");
+    crate::serial_println!("[paging] Kernel PML4 built and CR3 switched. SSE enabled (CR4.OSFXSR|OSXMMEXCPT, CR0.EM=0)");
 }
 
 // ── ring3 진입 ───────────────────────────────────────────────────────────────
@@ -220,6 +237,21 @@ pub fn init() {
 /// 4. KERNEL_MAIN_RSP 저장 (longjmp 복귀 지점)
 /// 5. IRETQ → ring3, 진입점 = ELF e_entry
 pub unsafe fn enter_elf(elf_data: &[u8]) -> ! {
+    // PT_INTERP 존재 (동적 링킹 필요) → DynLinker 경로로 분기
+    // ET_EXEC + PT_INTERP (일반 동적 실행 파일)과 ET_DYN (PIE) 모두 처리
+    let needs_dynlink = crate::elf::Elf64::parse(elf_data)
+        .map(|e| e.interp().is_some())
+        .unwrap_or(false);
+    if needs_dynlink {
+        // exec_replace는 현재 UserProc 슬롯을 갱신하므로 먼저 register 필요
+        let pid = crate::process::scheduler::alloc_pid();
+        let tmp_cr3 = alloc_user_pml4();
+        crate::process::userproc::register(pid, 0, tmp_cr3);
+        asm!("mov [{save}], rsp", save = in(reg) &raw mut KERNEL_MAIN_RSP,
+             options(nostack, preserves_flags));
+        crate::process::userproc::exec_replace(elf_data);
+    }
+
     // ELF 로드 (PML4 생성 + 세그먼트 매핑 + 스택 셋업)
     let (user_cr3, entry, user_sp) = load_elf_into_space(elf_data);
 
@@ -336,6 +368,131 @@ pub unsafe fn load_elf_into_space(elf_data: &[u8]) -> (u64, u64, u64) {
         user_cr3, entry, user_sp);
 
     (user_cr3, entry, user_sp)
+}
+
+/// BETA 20: ET_DYN 실행 파일(PIE)을 `base_addr`에 로드하고 (cr3, entry, user_rsp) 반환.
+///
+/// - ET_DYN이므로 PT_LOAD.vaddr은 0 기준 → base_addr + vaddr으로 매핑
+/// - 스택은 기존 USER_STACK_TOP 그대로
+/// - aux vector에 AT_PHDR/AT_PHENT/AT_PHNUM/AT_BASE/AT_ENTRY 포함
+pub unsafe fn load_dyn_exec(
+    elf_data:   &[u8],
+    base_addr:  u64,
+    phdr_va:    u64,  // AT_PHDR (DynLinker가 계산한 값)
+    phent:      u16,
+    phnum:      u16,
+    exec_entry: u64,  // 실행 파일 원래 진입점 (AT_ENTRY)
+    final_entry: u64, // 실제 점프할 진입점 (인터프리터 있으면 인터프리터)
+) -> (u64, u64, u64) {
+    use crate::elf::Elf64;
+
+    let elf      = Elf64::parse(elf_data).expect("[paging] load_dyn_exec: 잘못된 ELF");
+    let user_pml4 = alloc_table();
+    let kpml4    = table_at(KERNEL_CR3 & !0xFFF);
+    for i in 256..512usize { (*user_pml4).0[i] = kpml4.0[i]; }
+    let cr3 = user_pml4 as u64 - hhdm_offset();
+
+    // PT_LOAD 세그먼트 매핑 (vaddr + base_addr)
+    for seg in elf.load_segments() {
+        let mapped_va  = base_addr + seg.vaddr;
+        let page_start = mapped_va & !0xFFF;
+        let page_end   = (mapped_va + seg.memsz as u64 + 0xFFF) & !0xFFF;
+        let pte_flags  = PTE_USER | PTE_WRITABLE;
+        let mut vp = page_start;
+        while vp < page_end {
+            let phys      = frame::alloc_frame().expect("OOM: load_dyn_exec");
+            let fvirt     = (phys + hhdm_offset()) as *mut u8;
+            core::ptr::write_bytes(fvirt, 0, 4096);
+            let pg_off    = (vp.saturating_sub(page_start)) as usize;
+            let fsrc      = seg.offset + pg_off;
+            let fend      = (fsrc + 4096).min(seg.offset + seg.filesz).min(elf_data.len());
+            if fsrc < fend {
+                let dst_off = if vp < mapped_va { (mapped_va - vp) as usize } else { 0 };
+                core::ptr::copy_nonoverlapping(
+                    elf_data.as_ptr().add(fsrc), fvirt.add(dst_off), fend - fsrc,
+                );
+            }
+            map_4k(user_pml4, vp, phys, pte_flags);
+            vp += 4096;
+        }
+    }
+
+    // 스택 (기존 USER_STACK_TOP)
+    let mut stack_top_phys = 0u64;
+    for i in 0..USER_STACK_PAGES {
+        let phys  = frame::alloc_frame().expect("OOM: load_dyn_exec stack");
+        let vaddr = USER_STACK_TOP - ((i + 1) as u64) * 4096;
+        map_4k(user_pml4, vaddr, phys, PTE_WRITABLE | PTE_USER);
+        if i == 0 { stack_top_phys = phys; }
+    }
+
+    // aux vector에 AT_PHDR/AT_PHENT/AT_PHNUM/AT_BASE/AT_ENTRY 추가
+    let user_sp = setup_elf_stack_dyn(
+        stack_top_phys, hhdm_offset(), USER_STACK_TOP,
+        phdr_va, phent, phnum, base_addr, exec_entry,
+    );
+
+    crate::serial_println!(
+        "[paging] load_dyn_exec: cr3={:#x} entry={:#x} sp={:#x}",
+        cr3, final_entry, user_sp
+    );
+    (cr3, final_entry, user_sp)
+}
+
+/// BETA 20: 동적 링커용 aux vector 포함 스택 셋업.
+///
+/// Linux _start → __libc_start_main → getauxval() 경로가 필요로 하는 AT_* 추가.
+/// ```
+/// USER_STACK_TOP
+///   "prog\0"
+///   [auxv: AT_ENTRY/AT_BASE/AT_PHNUM/AT_PHENT/AT_PHDR/AT_CLKTCK/AT_PAGESZ/AT_NULL]
+///   [envp: NULL]
+///   [argv: ptr, NULL]
+///   [argc=1]  ← rsp
+/// ```
+#[allow(clippy::too_many_arguments)]
+unsafe fn setup_elf_stack_dyn(
+    phys: u64, hhdm: u64, top: u64,
+    phdr_va: u64, phent: u16, phnum: u16,
+    base: u64, exec_entry: u64,
+) -> u64 {
+    let page_hhdm  = (hhdm + phys) as *mut u8;
+    let page_ubase = top - 4096;
+    let mut cur: usize = 4096;
+
+    let prog_str = b"prog\0";
+    cur -= prog_str.len();
+    core::ptr::copy_nonoverlapping(prog_str.as_ptr(), page_hhdm.add(cur), prog_str.len());
+    let prog_ptr: u64 = page_ubase + cur as u64;
+    cur &= !0xF;
+
+    macro_rules! push {
+        ($v:expr) => {{ cur -= 8; *(page_hhdm.add(cur) as *mut u64) = $v as u64; }};
+    }
+
+    // AT_NULL
+    push!(0u64); push!(0u64);
+    // AT_ENTRY (실행 파일 진입점)
+    push!(exec_entry); push!(9u64);
+    // AT_BASE (인터프리터 로드 베이스; 인터프리터 없으면 0)
+    push!(base);       push!(7u64);
+    // AT_PHNUM
+    push!(phnum as u64); push!(5u64);
+    // AT_PHENT
+    push!(phent as u64); push!(4u64);
+    // AT_PHDR
+    push!(phdr_va);    push!(3u64);
+    // AT_CLKTCK
+    push!(100u64); push!(17u64);
+    // AT_PAGESZ
+    push!(4096u64); push!(6u64);
+
+    push!(0u64);      // envp NULL
+    push!(0u64);      // argv NULL
+    push!(prog_ptr);  // argv[0]
+    push!(1u64);      // argc
+
+    page_ubase + cur as u64
 }
 
 /// 유저 주소 공간 전체 deep-copy (fork 시 사용).
@@ -503,8 +660,6 @@ pub unsafe fn mmap_map(cr3: u64, vaddr: u64, data: &[u8], writable: bool) {
 /// `cr3` 주소 공간에 `vaddr`부터 `count` 페이지를 0으로 익명 매핑.
 pub unsafe fn mmap_anon(cr3: u64, vaddr: u64, pages: usize, writable: bool) {
     let pml4 = table_at(cr3 & !0xFFF);
-    let flags = PTE_USER | PTE_WRITABLE | if !writable { 0 } else { 0 }; // always writable for anon
-    let _ = writable;
     let flags = PTE_USER | PTE_WRITABLE;
     for i in 0..pages {
         let phys = crate::memory::frame::alloc_frame().expect("OOM: mmap_anon");
@@ -679,6 +834,51 @@ pub unsafe fn set_page_prot(cr3: u64, vaddr: u64, pages: usize, prot: u32) {
         (*pt).0[i1] = new_pte;
         core::arch::asm!("invlpg [{va}]", va = in(reg) va, options(nostack, preserves_flags));
     }
+}
+
+/// BETA 21: 새 유저 PML4를 할당하고 cr3(물리 주소)를 반환.
+///
+/// 커널 절반(256-511)을 현재 KERNEL_CR3에서 공유하고, 유저 절반(0-255)은 비워둠.
+/// DynLinker가 이 cr3를 받아서 PT_LOAD 세그먼트를 직접 매핑한다.
+pub unsafe fn alloc_user_pml4() -> u64 {
+    let user_pml4 = alloc_table();
+    let kpml4 = table_at(KERNEL_CR3 & !0xFFF);
+    for i in 256..512usize {
+        (*user_pml4).0[i] = kpml4.0[i];
+    }
+    user_pml4 as u64 - hhdm_offset()
+}
+
+/// BETA 21: `cr3` 주소 공간에 유저 스택을 셋업하고 RSP를 반환.
+///
+/// aux_phdr/phent/phnum/base/entry가 0이면 기본 aux vector(AT_PAGESZ/AT_CLKTCK만)로 셋업.
+pub unsafe fn setup_user_stack(
+    cr3: u64,
+    phdr_va: u64, phent: u16, phnum: u16, base: u64, entry: u64,
+) -> u64 {
+    let pml4 = table_at(cr3 & !0xFFF);
+    let mut stack_top_phys = 0u64;
+    for i in 0..USER_STACK_PAGES {
+        let phys  = frame::alloc_frame().expect("OOM: setup_user_stack");
+        let vaddr = USER_STACK_TOP - ((i + 1) as u64) * 4096;
+        map_4k(pml4, vaddr, phys, PTE_WRITABLE | PTE_USER);
+        if i == 0 { stack_top_phys = phys; }
+    }
+    if phdr_va != 0 || base != 0 {
+        setup_elf_stack_dyn(stack_top_phys, hhdm_offset(), USER_STACK_TOP,
+            phdr_va, phent, phnum, base, entry)
+    } else {
+        setup_elf_stack(stack_top_phys, hhdm_offset(), USER_STACK_TOP)
+    }
+}
+
+/// BETA 19: 단일 4KB 페이지를 `cr3` 주소 공간에 매핑 (dynlink 전용 공개 API).
+///
+/// phys는 이미 할당된 물리 프레임이어야 함 (zero-init은 호출자 책임).
+pub unsafe fn pub_map_4k(cr3: u64, vaddr: u64, phys: u64, writable: bool) {
+    let pml4 = table_at(cr3 & !0xFFF);
+    let flags = PTE_USER | if writable { PTE_WRITABLE } else { 0 };
+    map_4k(pml4, vaddr, phys, flags);
 }
 
 pub unsafe fn enter_user_demo(code: &[u8]) -> ! {

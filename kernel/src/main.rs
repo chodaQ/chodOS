@@ -20,10 +20,12 @@
 
 extern crate alloc;
 
+mod dynlink;       // BETA 19: ELF .so 파서 & 재배치 엔진 (Phase D)
 mod tracer;        // BETA-X-2 1: Event Tracer — 자율 결정 블랙박스
 mod bench_a1;     // BETA-X 검증 A-1: 페이로드 크기 스윕
 mod bench_a2;     // BETA-X 검증 A-2: -smp 4 멀티코어 레이턴시 비교
 mod bench_ipc;    // BETA-X 7: IPC 레이턴시 A/B 벤치마크
+mod bench_pe4;    // PE-4: Policy Engine on/off A/B 벤치마크
 mod power;        // Policy B-2: 전력 관리 보조 모듈
 mod elf;
 mod fb;
@@ -1839,6 +1841,23 @@ pub extern "C" fn _start() -> ! {
         serial_println!("[a2] AP 없음 (단일코어 모드) — A-2 건너뜀");
         serial_println!("[a2] QEMU 실행 시 -smp 4 옵션 확인 (Makefile에 이미 포함)");
     }
+
+    // ── PE-4: Policy Engine A/B 벤치마크 ─────────────────────────────────────
+    serial_println!("===========================================");
+    serial_println!("  PE-4: Policy Engine on/off A/B 벤치마크");
+    serial_println!("  워크로드: cpu_hog(배경) + kbd_task(전경, n={})", bench_pe4::N_SAMPLES);
+    serial_println!("===========================================");
+
+    policy::set_enabled(true);
+    let pe_on = bench_pe4::run("PE=ON ");
+
+    policy::set_enabled(false);
+    let pe_off = bench_pe4::run("PE=OFF");
+    policy::set_enabled(true); // 이후 데모에 영향 없도록 원복
+
+    bench_pe4::report_ab(pe_on, pe_off);
+    serial_println!("--- PE-4 complete ---\n");
+
     // ── BETA-X-2 1: Event Tracer dump ────────────────────────────────────────
     tracer::dump();
     serial_println!("--- BETA-X A-2 complete ---\n");

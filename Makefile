@@ -26,6 +26,10 @@ MULS_ELF    := build/muls.elf
 MUPWD_ELF   := build/mupwd.elf
 PKG_ELFS    := $(SYSINFO_ELF) $(MUECHO_ELF) $(MUCAT_ELF) $(MULS_ELF) $(MUPWD_ELF)
 
+# BETA 21: musl-linked 동적 바이너리 + 런타임
+MUSL_SO     := build/lib/ld-musl-x86_64.so.1
+DYN_HELLO   := build/dyn_hello.elf
+
 # ALPHA 17: 8x8 비트맵 폰트 바이너리 (scripts/gen_font.py 생성)
 FONT_BIN := build/font8x8.bin
 
@@ -93,14 +97,16 @@ limine-fetch: $(LIMINE_DIR)
 .PHONY: rootfs
 rootfs: $(ROOTFS_IMG)
 
-$(ROOTFS_IMG):
+$(ROOTFS_IMG): $(MUSL_SO) $(DYN_HELLO)
 	@echo "[ext4] Building root filesystem image..."
 	@test -x "$(MKE2FS)" || \
 		(echo "ERROR: e2fsprogs not found. Run: brew install e2fsprogs" && exit 1)
 	@rm -rf $(ROOTFS_STAGING) && mkdir -p \
 		$(ROOTFS_STAGING)/etc \
 		$(ROOTFS_STAGING)/var/log \
-		$(ROOTFS_STAGING)/home
+		$(ROOTFS_STAGING)/home \
+		$(ROOTFS_STAGING)/lib \
+		$(ROOTFS_STAGING)/bin
 	@printf 'NAME=MuKernel\nVERSION=0.1.0-alpha\nPRETTY_NAME=MuKernel 0.1 Alpha\n' \
 		> $(ROOTFS_STAGING)/etc/os-release
 	@printf 'Hello from ext4!\nThis file lives on a real disk image.\n' \
@@ -111,6 +117,11 @@ $(ROOTFS_IMG):
 		> $(ROOTFS_STAGING)/var/log/boot.log
 	@printf 'Welcome to MuKernel!\n' \
 		> $(ROOTFS_STAGING)/home/welcome.txt
+	@# BETA 21: musl 동적 링커 + 테스트 바이너리
+	@cp $(MUSL_SO) $(ROOTFS_STAGING)/lib/ld-musl-x86_64.so.1
+	@cp $(DYN_HELLO) $(ROOTFS_STAGING)/bin/hello_dyn
+	@echo "[ext4] /lib/ld-musl-x86_64.so.1 포함 ($(shell wc -c < $(MUSL_SO) | tr -d ' ') bytes)"
+	@echo "[ext4] /bin/hello_dyn 포함 ($(shell wc -c < $(DYN_HELLO) | tr -d ' ') bytes)"
 	@$(MKE2FS) -t ext4 -d $(ROOTFS_STAGING) -F -q \
 		-L "mukernel-root" \
 		-O ^metadata_csum,^64bit,^has_journal \
@@ -194,6 +205,31 @@ font: $(FONT_BIN)
 $(FONT_BIN): scripts/gen_font.py
 	@mkdir -p build
 	python3 scripts/gen_font.py
+
+# ==================== BETA 21: musl 런타임 + 동적 바이너리 ====================
+
+# musl .so: scripts/fetch_musl.sh가 빌드 (Alpine apk에서 추출)
+$(MUSL_SO):
+	@echo "[musl] musl 런타임 없음 → fetch_musl.sh 실행..."
+	@mkdir -p build/lib
+	bash scripts/fetch_musl.sh
+
+# musl-linked 동적 테스트 바이너리
+$(DYN_HELLO): user/musl-test/hello_dyn_start.c $(MUSL_SO)
+	@echo "[musl] 동적 바이너리 빌드 시도..."
+	@MUSL_GCC=""; \
+	for c in x86_64-linux-musl-gcc /opt/homebrew/bin/x86_64-linux-musl-gcc; do \
+		if command -v $$c >/dev/null 2>&1; then MUSL_GCC=$$c; break; fi; \
+	done; \
+	if [ -n "$$MUSL_GCC" ]; then \
+		$$MUSL_GCC -nostartfiles \
+			-Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+			-o $(DYN_HELLO) user/musl-test/hello_dyn_start.c -lc; \
+		echo "[musl] $(DYN_HELLO) 빌드 완료"; \
+	else \
+		echo "[musl] musl-cross 없음 → musl_hello.elf로 대체 (정적)"; \
+		cp build/musl_hello.elf $(DYN_HELLO); \
+	fi
 
 # ==================== 커널 빌드 ====================
 
