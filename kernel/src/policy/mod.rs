@@ -250,17 +250,27 @@ const PRIORITY_COOLDOWN_WINDOWS: u8 = 3;
 const TIME_SLICE_MIN: u64 = 1;
 const TIME_SLICE_MAX: u64 = 4;
 
-// ── ST-1: 평가 주기(report_interval) 동적화 ──────────────────────────────────
-/// report_interval 허용 범위 (틱 단위) — Safety Bounds
-const REPORT_INTERVAL_MIN: u64 = 8;
-const REPORT_INTERVAL_MAX: u64 = 72;
-/// PE-4 off 상태 및 초기 기준값 (BETA-X-2까지의 고정 36틱과 동일)
-const REPORT_INTERVAL_BASELINE: u64 = 36;
-/// 창당 스위치율(×10 고정소수점, 예: 15 = 1.5회/틱) 이 이상이면 "부하 높음"
-/// → 짧은 주기(REPORT_INTERVAL_MIN)로 더 자주 관찰
+// ── ST-1: 평가 주기(report_interval) 동적화 (안정화 버전, 실험 21→22) ────────
+//
+// 실험 21에서 8↔72 직행 진동을 발견 — switch_rate_x10을 "방금 끝난 창의
+// 길이"로 나누는데 그 창 길이 자체가 지난 조정 결과라 자기참조적 되먹임
+// 루프가 됐음. 아래 3중 안전장치로 안정화:
+//   1) Hysteresis  — 8/18/36/72 4단계 사다리에서 창당 ±1단계만 이동 (직행 금지)
+//   2) EMA 평활화  — raw 스위치율 대신 EMA로 노이즈 흡수 (다른 신호들과 동일 α=0.3)
+//   3) 표본 부족 유보 — 창내 스위치 수가 너무 적으면 조정 자체를 건너뜀
+/// report_interval 4단계 사다리 (틱 단위) — 인덱스가 곧 Safety Bounds 역할
+const REPORT_INTERVAL_LEVELS: [u64; 4] = [8, 18, 36, 72];
+/// 사다리 내 "기준" 인덱스 (36틱) — PE-4 off 상태 및 판단 애매 구간의 목표치
+const REPORT_INTERVAL_BASELINE_LEVEL: usize = 2;
+/// PE-4 off 상태에서 사용하는 고정값 (BETA-X-2까지의 고정 36틱과 동일)
+const REPORT_INTERVAL_BASELINE: u64 = REPORT_INTERVAL_LEVELS[REPORT_INTERVAL_BASELINE_LEVEL];
+/// 창당 스위치율 EMA(×10 고정소수점, 예: 15 = 1.5회/틱)가 이 이상이면 "부하 높음"
+/// → 사다리에서 더 짧은 방향(8틱 쪽)으로 한 단계 이동
 const SWITCH_RATE_HIGH_X10: u64 = 15;
-/// 이 이하이면 "부하 낮음" → 긴 주기(REPORT_INTERVAL_MAX)로 오버헤드 절감
+/// 이 이하이면 "부하 낮음" → 사다리에서 더 긴 방향(72틱 쪽)으로 한 단계 이동
 const SWITCH_RATE_LOW_X10: u64 = 3;
+/// 이 미만의 창내 스위치 수는 표본 부족으로 간주 — 조정 보류, 이전 값 유지
+const SWITCH_SAMPLE_MIN: u64 = 5;
 /// 한 리포트 창당 최대 신규 채널 생성 수
 const MAX_CHANNELS_PER_WINDOW: u8 = 2;
 /// 채널 회수(이상/decay) 후 재생성 금지 기간 (틱 단위, ≈2창)
@@ -299,6 +309,10 @@ pub struct PolicyEngine {
     rl_rng: u64,
     /// ST-1: 이번 창에서 발생한 컨텍스트 스위치 수 (창 시작마다 0 리셋)
     switches_this_window: u64,
+    /// ST-1: 창당 스위치율 EMA (×10 고정소수점, α=0.3)
+    switch_rate_ema: u64,
+    /// ST-1: REPORT_INTERVAL_LEVELS 내 현재 인덱스 (Hysteresis 상태)
+    report_interval_level: usize,
 }
 
 impl PolicyEngine {
@@ -318,6 +332,8 @@ impl PolicyEngine {
             rl_epsilon: RL_EPSILON_INIT,
             rl_rng:     0x123456789abcdef0,
             switches_this_window: 0,
+            switch_rate_ema: 0,
+            report_interval_level: REPORT_INTERVAL_BASELINE_LEVEL,
         }
     }
 
@@ -562,37 +578,61 @@ impl PolicyEngine {
         let old_slice = TIME_SLICE.load(Ordering::Relaxed);
         let mut max_pct: u64 = 0;
 
-        // ── ST-1: 평가 주기(report_interval) 동적화 ────────────────────────────
+        // ── ST-1: 평가 주기(report_interval) 동적화 — 안정화 버전 (실험 22) ────
         // "관찰 → 판단 → 조정 → 검증": 방금 끝난 창의 컨텍스트 스위치 빈도를 보고
-        // 다음 평가 주기를 조정한다. 스위치가 잦음(부하 높음) → 8틱로 짧게 해서
-        // 더 자주 반응, 스위치가 드묾(부하 낮음) → 72틱로 늘려 오버헤드 절감.
+        // 다음 평가 주기를 조정한다. 실험 21의 8↔72 직행 진동을 막기 위해
+        // 표본 부족 유보 → EMA 평활화 → Hysteresis(±1단계) 순으로 적용.
         // PE-4와 동일한 패턴: off 상태에서는 BETA-X-2 이전 고정값(36틱) 유지.
         let switches = self.switches_this_window;
         self.switches_this_window = 0;
-        let switch_rate_x10 = (switches * 10) / window; // 창당 평균 스위치 수 ×10
-
         let old_interval = self.report_interval;
-        let new_interval: u64 = if is_enabled() {
-            let raw = if switch_rate_x10 >= SWITCH_RATE_HIGH_X10 {
-                REPORT_INTERVAL_MIN
-            } else if switch_rate_x10 <= SWITCH_RATE_LOW_X10 {
-                REPORT_INTERVAL_MAX
+
+        if is_enabled() {
+            if switches < SWITCH_SAMPLE_MIN {
+                // 3) 표본 부족 — 판단 자체를 보류 (EMA도 갱신하지 않음, 이전 값 유지)
+                crate::serial_println!(
+                    "[policy-ST1] 표본 부족(스위치={} < {}) — 평가 주기 유지 {}틱",
+                    switches, SWITCH_SAMPLE_MIN, old_interval,
+                );
             } else {
-                REPORT_INTERVAL_BASELINE
-            };
-            raw.max(REPORT_INTERVAL_MIN).min(REPORT_INTERVAL_MAX) // Safety Bounds
+                // 2) EMA 평활화 — 다른 신호(vol_ema, idle_pct_ema)와 동일한 α=0.3 공식
+                let raw_rate_x10 = (switches * 10) / window;
+                let new_ema = (3 * raw_rate_x10 + 7 * self.switch_rate_ema) / 10;
+                self.switch_rate_ema = new_ema;
+
+                let target_level: usize = if new_ema >= SWITCH_RATE_HIGH_X10 {
+                    0 // 부하 높음 — 사다리 최하단(8틱) 방향
+                } else if new_ema <= SWITCH_RATE_LOW_X10 {
+                    REPORT_INTERVAL_LEVELS.len() - 1 // 부하 낮음 — 사다리 최상단(72틱) 방향
+                } else {
+                    REPORT_INTERVAL_BASELINE_LEVEL
+                };
+
+                // 1) Hysteresis — 목표가 몇 단계 떨어져 있어도 창당 ±1단계만 이동
+                let cur = self.report_interval_level;
+                self.report_interval_level = if target_level > cur {
+                    cur + 1
+                } else if target_level < cur {
+                    cur - 1
+                } else {
+                    cur
+                };
+                self.report_interval = REPORT_INTERVAL_LEVELS[self.report_interval_level];
+
+                if self.report_interval != old_interval {
+                    crate::tracer::param_tuned(1, old_interval, self.report_interval);
+                    crate::serial_println!(
+                        "[policy-ST1] 평가 주기 조정: {}→{}틱 (EMA스위치율={}.{}/틱, raw={}.{}/틱, 전체스위치={})",
+                        old_interval, self.report_interval,
+                        new_ema / 10, new_ema % 10,
+                        raw_rate_x10 / 10, raw_rate_x10 % 10, switches,
+                    );
+                }
+            }
         } else {
-            REPORT_INTERVAL_BASELINE
-        };
-        if new_interval != old_interval {
-            crate::tracer::param_tuned(1, old_interval, new_interval);
-            crate::serial_println!(
-                "[policy-ST1] 평가 주기 조정: {}→{}틱 (스위치율={}.{}/틱, 전체스위치={})",
-                old_interval, new_interval,
-                switch_rate_x10 / 10, switch_rate_x10 % 10, switches,
-            );
+            self.report_interval       = REPORT_INTERVAL_BASELINE;
+            self.report_interval_level = REPORT_INTERVAL_BASELINE_LEVEL;
         }
-        self.report_interval = new_interval;
 
         crate::serial_println!(
             "[policy] ── CPU 리포트 (tick={}, slice={}틱) ──", tick, old_slice

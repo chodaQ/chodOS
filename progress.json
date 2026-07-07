@@ -6,7 +6,7 @@
     { "phase": "ML",      "status": "done", "label": "1–4 완료 (ML4 AND 87%) ✓" },
     { "phase": "Phase D", "status": "done", "label": "BETA 19~21 완료 ✓ — musl 동적 링킹 end-to-end" },
     { "phase": "PE 1-5",  "status": "done", "label": "Policy Engine 확장 완료 ✓ — 메모리·전력·코어·A/B·CFS비교" },
-    { "phase": "Self-Tuning", "status": "in_progress", "label": "ST-1 완료 (진동 이슈 발견) — ST-2~5 진행 예정" }
+    { "phase": "Self-Tuning", "status": "in_progress", "label": "ST-1 안정화 완료 (Hysteresis+EMA+표본유보) — ST-2~5 진행 예정" }
   ],
   "stats": {
     "ipc":  "32×",
@@ -35,7 +35,7 @@
     { "status": "done", "label": "PE-3: 코어 특성 감지", "detail": "CPUID leaf 0x1A P-core/E-core 구조 완성 (QEMU는 미지원, 실측 불가 확인)", "phase": "PE 1-5" },
     { "status": "done", "label": "PE-4: Policy Engine A/B", "detail": "on/off 비교 — 레이턴시 4.5배 개선 vs hog완료 9배 지연 트레이드오프 확인", "phase": "PE 1-5" },
     { "status": "done", "label": "PE-5: Linux CFS 비교", "detail": "Docker Linux VM 벤치마크 — CFS는 처리량 희생 없이 유사한 반응성 확보(구조적 비교)", "phase": "PE 1-5" },
-    { "status": "done", "label": "ST-1: 평가 주기 동적화", "detail": "컨텍스트 스위치 빈도 기반 report_interval 자동 조정(8~72틱), Event Tracer ParamTuned 추가 — 부팅 검증 완료, 단 진동(oscillation) 이슈 발견(실험 21)", "phase": "Self-Tuning" },
+    { "status": "done", "label": "ST-1: 평가 주기 동적화", "detail": "컨텍스트 스위치 빈도 기반 report_interval 자동 조정(8/18/36/72틱 사다리), Event Tracer ParamTuned 추가 — 실험 21에서 진동 발견 → 실험 22에서 Hysteresis(±1단계)+EMA 평활화+표본부족 유보 3중 안전장치로 안정화 완료, 부팅 검증됨", "phase": "Self-Tuning" },
     { "status": "todo", "label": "ST-2: EMA α 동적화", "detail": "프로세스 행동 안정성에 따라 α 0.1~0.5 자동 조정", "phase": "Self-Tuning" },
     { "status": "todo", "label": "ST-3: TIME_SLICE 범위 동적화", "detail": "레이턴시/처리량 트레이드오프 관찰 기반 범위 자동 조정", "phase": "Self-Tuning" },
     { "status": "todo", "label": "ST-4: WorkloadProfile 자동 감지", "detail": "게임/빌드/균형 워크로드 자동 감지 → ST-3 범위 선택", "phase": "Self-Tuning" },
