@@ -6,7 +6,7 @@
     { "phase": "ML",      "status": "done", "label": "1–4 완료 (ML4 AND 87%) ✓" },
     { "phase": "Phase D", "status": "done", "label": "BETA 19~21 완료 ✓ — musl 동적 링킹 end-to-end" },
     { "phase": "PE 1-5",  "status": "done", "label": "Policy Engine 확장 완료 ✓ — 메모리·전력·코어·A/B·CFS비교" },
-    { "phase": "Self-Tuning", "status": "in_progress", "label": "ST-1 안정화 완료 (Hysteresis+EMA+표본유보) — ST-2~5 진행 예정" }
+    { "phase": "Self-Tuning", "status": "in_progress", "label": "ST-1~4 완료 — ST-5는 벤치마크가 짧아 가설 기각, 장기 벤치마크 재설계는 보류" }
   ],
   "stats": {
     "ipc":  "32×",
@@ -36,10 +36,10 @@
     { "status": "done", "label": "PE-4: Policy Engine A/B", "detail": "on/off 비교 — 레이턴시 4.5배 개선 vs hog완료 9배 지연 트레이드오프 확인", "phase": "PE 1-5" },
     { "status": "done", "label": "PE-5: Linux CFS 비교", "detail": "Docker Linux VM 벤치마크 — CFS는 처리량 희생 없이 유사한 반응성 확보(구조적 비교)", "phase": "PE 1-5" },
     { "status": "done", "label": "ST-1: 평가 주기 동적화", "detail": "컨텍스트 스위치 빈도 기반 report_interval 자동 조정(8/18/36/72틱 사다리), Event Tracer ParamTuned 추가 — 실험 21에서 진동 발견 → 실험 22에서 Hysteresis(±1단계)+EMA 평활화+표본부족 유보 3중 안전장치로 안정화 완료, 부팅 검증됨", "phase": "Self-Tuning" },
-    { "status": "todo", "label": "ST-2: EMA α 동적화", "detail": "프로세스 행동 안정성에 따라 α 0.1~0.5 자동 조정", "phase": "Self-Tuning" },
-    { "status": "todo", "label": "ST-3: TIME_SLICE 범위 동적화", "detail": "레이턴시/처리량 트레이드오프 관찰 기반 범위 자동 조정", "phase": "Self-Tuning" },
-    { "status": "todo", "label": "ST-4: WorkloadProfile 자동 감지", "detail": "게임/빌드/균형 워크로드 자동 감지 → ST-3 범위 선택", "phase": "Self-Tuning" },
-    { "status": "todo", "label": "ST-5: A/B 비교 재측정", "detail": "Self-Tuning 적용 후 PE-4와 동일 워크로드 재측정", "phase": "Self-Tuning" },
+    { "status": "done", "label": "ST-2: EMA α 동적화", "detail": "프로세스별 vol_ema 변동성 기반 α 0.1~0.5 자동 조정(5단계 사다리), 동일 3중 안전장치 재사용 — 실험 23에서 진동 없이 안정 수렴 확인. 단 '급변→α상승' 방향은 이번 워크로드에서 미관측(한계로 기록)", "phase": "Self-Tuning" },
+    { "status": "done", "label": "ST-3: TIME_SLICE 범위 동적화", "detail": "High/Low 분류 비율(워크로드 성격) 기반 범위 3단계 사다리(2~3/1~3/1~4) 자동 조정, 동일 3중 안전장치 재사용 — 실험 24에서 '빌드모드 미트리거'를 baseline 비대칭 탓으로 결론 냈으나, 실험 25에서 재조사한 결과 진짜 원인은 kill_pid()가 Policy Engine에 죽음을 통보하지 않아 죽은 프로세스 stats가 영원히 High로 남는 stale-slot 버그였음(policy::unregister_pid 추가로 수정). CPU바운드 전용 워크로드로 1-4→1-3→2-3(빌드모드) 및 역방향 복귀 양방향 모두 실측 검증 완료", "phase": "Self-Tuning" },
+    { "status": "done", "label": "ST-4: WorkloadProfile 자동 감지", "detail": "실험 27: ST-3에 박혀 있던 판단 로직을 WorkloadProfile enum(Build/Balanced/Game)으로 분리 — ST-4가 판단, ST-3는 결과를 소비해 TIME_SLICE 범위만 매핑. 실험 25와 동일 지점·동일 값에서 전환 재현되어 회귀 없음 확인. 다음 후보: PE-2/PE-3가 이 프로파일을 소비하도록 확장", "phase": "Self-Tuning" },
+    { "status": "in_progress", "label": "ST-5: A/B 비교 재측정", "detail": "실험 26: PE-4와 동일 워크로드로 재측정했으나 레이턴시/처리량 수치가 실험19와 오차범위 내 동일 — 가설 기각. 원인은 PE-4 워크로드(~37틱)가 report_interval baseline(36틱)과 거의 같아 ST-1/ST-3가 개입할 리포트 창이 사실상 1개뿐이었기 때문(Self-Tuning 무효가 아니라 벤치마크가 너무 짧음). HOG_TARGET_ITERS를 크게 늘린 장기 워크로드 재설계가 필요하나 사용자 지시로 보류(deferred) — ST-4를 먼저 진행", "phase": "Self-Tuning" },
     { "status": "todo", "label": "Phase E: 네트워크",  "detail": "smoltcp + DNS + TLS",            "phase": "Phase E"  }
   ]
 }

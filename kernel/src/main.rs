@@ -130,6 +130,35 @@ fn preempt_task_b() -> ! {
     }
 }
 
+// ── ST-3 검증(실험 25): CPU바운드 전용 워크로드 ────────────────────────────
+// task_a/task_b와 동일 패턴(yield 없음)을 task_c/task_d로 복제해 IPC/yield
+// 프로세스가 전혀 없는 순수 CPU바운드 4개 워크로드를 구성한다. 목적은
+// ST-3(TIME_SLICE 범위 동적화)의 "빌드모드로 좁히기" 경로를 실제로
+// 트리거시켜 검증하는 것 — 실험 24에서는 죽은 프로세스의 stale 상태가
+// cnt_high를 계속 부풀려 이 경로가 한 번도 발동하지 않았다(policy::unregister
+// 버그 수정으로 해결).
+fn preempt_task_c() -> ! {
+    serial_println!("[task_c] started — no yield, preempted by timer");
+    let mut i: u64 = 0;
+    loop {
+        i += 1;
+        if i % 5_000_000 == 0 {
+            serial_println!("[task_c] running... (loop #{})", i / 5_000_000);
+        }
+    }
+}
+
+fn preempt_task_d() -> ! {
+    serial_println!("[task_d] started — no yield, preempted by timer");
+    let mut i: u64 = 0;
+    loop {
+        i += 1;
+        if i % 5_000_000 == 0 {
+            serial_println!("[task_d] running... (loop #{})", i / 5_000_000);
+        }
+    }
+}
+
 // ==================== BETA-X 6: 채널 회수(Decay) 데모 ====================
 
 static DECAY_RECV_PID: AtomicU64 = AtomicU64::new(0);
@@ -369,6 +398,40 @@ pub extern "C" fn _start() -> ! {
     process::scheduler::kill_pid(pa);
     process::scheduler::kill_pid(pb);
     serial_println!("[sched] task_a / task_b killed. Continuing...\n");
+
+    // ── 8-1. ST-3 검증(실험 25): CPU바운드 전용 워크로드 ──────────────────
+    // sender/receiver(High 우선순위, IPC/yield) 없이 순수 CPU바운드 프로세스
+    // 4개만 오래 돌려서, TIME_SLICE 범위가 실제로 빌드모드(2~3틱)까지
+    // 좁혀지는지 관찰한다. task_a/task_b는 위에서 이미 kill_pid()로 죽었고
+    // (policy::unregister_pid 수정 덕분에 이제 stats 슬롯도 비활성화됨),
+    // 여기서는 완전히 새로운 4개 프로세스로 다시 시작한다.
+    serial_println!("===========================================");
+    serial_println!("  ST-3 검증: CPU바운드 전용 워크로드 (실험 25)");
+    serial_println!("  (IPC/yield 프로세스 없음 — 빌드모드 트리거 관찰)");
+    serial_println!("===========================================");
+
+    let pc = process::scheduler::alloc_pid();
+    process::scheduler::spawn(process::Process::new(pc, "task_c", preempt_task_c));
+    let pd = process::scheduler::alloc_pid();
+    process::scheduler::spawn(process::Process::new(pd, "task_d", preempt_task_d));
+    let pe = process::scheduler::alloc_pid();
+    process::scheduler::spawn(process::Process::new(pe, "task_e", preempt_task_a));
+    let pf = process::scheduler::alloc_pid();
+    process::scheduler::spawn(process::Process::new(pf, "task_f", preempt_task_b));
+
+    // 300틱(≈16.5초) 대기 — report_interval이 8틱까지 줄어들 여유를 주고
+    // ST-3의 Hysteresis(창당 ±1단계)가 baseline(게임모드)에서 빌드모드까지
+    // 2단계 이동할 시간을 확보한다.
+    let st3_start_tick = interrupts::handlers::TICK.load(Ordering::Relaxed);
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - st3_start_tick < 300 {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+
+    process::scheduler::kill_pid(pc);
+    process::scheduler::kill_pid(pd);
+    process::scheduler::kill_pid(pe);
+    process::scheduler::kill_pid(pf);
+    serial_println!("[sched] ST-3 검증 워크로드 종료. Continuing...\n");
 
     // ── 9. ext4 데모 (ALPHA 8) ────────────────────────────────────────────
     serial_println!("===========================================");

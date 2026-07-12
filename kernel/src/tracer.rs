@@ -21,7 +21,7 @@
 //! | DecayWarning      | from  | to    | 0     | cold<<16|max_cold  |
 //! | PolicyTick        | 0     | 0     | 0     | tick               |
 //! | Anomaly           | from  | to    | cap   | reason code        |
-//! | ParamTuned        | param_id | 0  | 0     | old_val<<32|new_val|
+//! | ParamTuned        | param_id | subject_id | 0 | old_val<<32|new_val|
 
 use spin::Mutex;
 
@@ -203,16 +203,20 @@ pub fn anomaly(from: u32, to: u32, cap: u32, reason: u64) {
     });
 }
 
-/// ST-1: Self-Tuning Policy Engine이 파라미터를 조정할 때마다 기록.
+/// ST-1~4: Self-Tuning Policy Engine이 파라미터를 조정할 때마다 기록.
 ///
 /// "왜 갑자기 이렇게 동작하지?"를 사후 추적하기 위함 (ARCHITECTURE.md
 /// Self-Tuning 트랙 설계 원칙: 모든 조정은 Event Tracer에 기록).
 ///
-/// param_id: 1=report_interval (추후 2=ema_alpha, 3=time_slice_range 등 확장)
-pub fn param_tuned(param_id: u32, old: u64, new: u64) {
+/// param_id: 1=report_interval(전역), 2=ema_alpha(프로세스별),
+/// 4=workload_profile(전역, ST-4). subject_id: 전역 파라미터는 0, 프로세스별
+/// 파라미터는 해당 pid. (3=time_slice_range는 ST-4 도입 이후 별도 소비자로
+/// 통합되어 더 이상 독립적으로 기록되지 않음 — workload_profile 이벤트로
+/// 대체됨)
+pub fn param_tuned(param_id: u32, subject_id: u32, old: u64, new: u64) {
     record(TraceEvent {
         ts: rdtsc(), kind: EventKind::ParamTuned,
-        pid_a: param_id, pid_b: 0, cap: 0,
+        pid_a: param_id, pid_b: subject_id, cap: 0,
         extra: (old << 32) | (new & 0xFFFF_FFFF),
     });
 }
@@ -321,8 +325,8 @@ fn print_event(seq: usize, ev: &TraceEvent) {
             let old = (ev.extra >> 32) as u32;
             let new = ev.extra as u32;
             crate::serial_println!(
-                "[tracer]  {:>3} {:016x}  {}  param#{}  {}→{}",
-                seq, ev.ts, ev.kind.label(), ev.pid_a, old, new,
+                "[tracer]  {:>3} {:016x}  {}  param#{} subj={}  {}→{}",
+                seq, ev.ts, ev.kind.label(), ev.pid_a, ev.pid_b, old, new,
             );
         },
     }

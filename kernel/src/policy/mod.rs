@@ -59,10 +59,17 @@ pub struct CpuStats {
     pub pri_cooldown: u8,
     /// voluntary 비율 EMA (×10 고정소수점, 예: 605 = 60.5%)
     ///
-    /// 공식: new_ema = (3 × current_vol_pct×10 + 7 × old_ema) / 10
-    /// α=0.3 → 최근 관찰에 30% 가중치, 과거 추세에 70% 가중치.
+    /// 공식: new_ema = (α_num × current_vol_pct×10 + (10-α_num) × old_ema) / 10
+    /// α_num은 ST-2가 ALPHA_LEVELS에서 동적으로 선택 (기존엔 고정 3, 즉 α=0.3).
     /// 초기값 500 (50%) — neutral에서 출발해 실측치로 수렴.
     pub vol_ema: u64,
+    // ── ST-2: EMA α 동적화 (ST-1과 동일한 3중 안전장치 템플릿 재사용) ────────
+    /// ALPHA_LEVELS 내 현재 인덱스 (Hysteresis 상태) — 값이 클수록 민감(빠른 반응)
+    pub alpha_level: u8,
+    /// 직전 창의 원시 vol_pct×10 (변동성 계산용)
+    pub prev_vol_10: u64,
+    /// 창간 변동성(|cur-prev| delta) EMA (×10 고정소수점, 추가 정밀도용)
+    pub volatility_ema: u64,
 }
 
 impl CpuStats {
@@ -76,6 +83,9 @@ impl CpuStats {
             switch_in_count: 0,
             pri_cooldown: 0,
             vol_ema: 500, // 50.0% — neutral 초기값
+            alpha_level: ALPHA_BASELINE_LEVEL as u8,
+            prev_vol_10: 500,
+            volatility_ema: 0,
         }
     }
 }
@@ -246,9 +256,7 @@ const ANOMALY_REASON_PAYLOAD_SPIKE: u64 = 0x02;
 // ── BETA-X-2 6: Safety Bounds ─────────────────────────────────────────────────
 /// 우선순위 변경 후 최소 대기 창 수 (연속 thrashing 방지)
 const PRIORITY_COOLDOWN_WINDOWS: u8 = 3;
-/// TIME_SLICE 허용 범위 (틱 단위)
-const TIME_SLICE_MIN: u64 = 1;
-const TIME_SLICE_MAX: u64 = 4;
+// TIME_SLICE 허용 범위는 ST-3에서 동적화됨 (TIME_SLICE_RANGE_LEVELS 참고)
 
 // ── ST-1: 평가 주기(report_interval) 동적화 (안정화 버전, 실험 21→22) ────────
 //
@@ -271,6 +279,80 @@ const SWITCH_RATE_HIGH_X10: u64 = 15;
 const SWITCH_RATE_LOW_X10: u64 = 3;
 /// 이 미만의 창내 스위치 수는 표본 부족으로 간주 — 조정 보류, 이전 값 유지
 const SWITCH_SAMPLE_MIN: u64 = 5;
+
+// ── ST-2: EMA α 동적화 (ST-1과 동일한 3중 안전장치 템플릿 재사용) ────────────
+//
+// PE-5에서 지적된 "하드코딩된 EMA α=0.3"을 대상으로: 프로세스 행동이
+// 안정적이면(변동성 낮음) α를 낮춰(0.1) 노이즈를 억제하고, 급변하면
+// (예: 빌드 → 타이핑 전환) α를 높여(0.5) 빠르게 반응하도록 한다.
+/// vol_pct×10(‰) 변화량 기준 α 5단계 사다리 (분자값, /10 하면 실제 α)
+/// [0.1, 0.2, 0.3, 0.4, 0.5]
+const ALPHA_LEVELS: [u64; 5] = [1, 2, 3, 4, 5];
+/// 사다리 내 "기준" 인덱스 (α=0.3) — 기존 하드코딩 값과 동일한 출발점
+const ALPHA_BASELINE_LEVEL: usize = 2;
+/// 창간 변동성 EMA(×10 고정소수점)가 이 이상이면 "행동 급변" → α를 높이는 방향
+const VOLATILITY_HIGH_X10: u64 = 3000; // 변동성 EMA 300‰ (=30%p) 이상
+/// 이 이하이면 "행동 안정" → α를 낮추는 방향
+const VOLATILITY_LOW_X10: u64 = 500;   // 변동성 EMA 50‰ (=5%p) 이하
+/// 이 미만의 창당 스케줄 이벤트(vol+forced) 수는 표본 부족 — α 조정 보류
+const ALPHA_SAMPLE_MIN: u64 = 5;
+
+// ── ST-4: WorkloadProfile 자동 감지 (ST-1/2/3과 동일한 3중 안전장치) ────────
+//
+// 원래 ST-3(TIME_SLICE 범위 동적화)에 직접 박혀 있던 "High/Low 분류 비율로
+// 워크로드 성격 판단" 로직을 별도 단계로 분리했다. ST-3는 이제 "판단된
+// 프로파일로 범위를 고른다"는 단순 매핑만 담당하고, "지금이 게임/빌드/균형
+// 중 무엇인가"를 감지하는 일반 로직은 ST-4가 소유한다 — 향후 PE-2(전력)나
+// PE-3(코어 권고) 등 다른 트랙도 같은 프로파일을 소비할 수 있게 하기 위함
+// (README "게임 실행됨 → 성능 모드", "빌드 + 타이핑 동시" 시나리오 참고).
+/// ST-4가 감지하는 3가지 워크로드 프로파일. 인덱스가 TIME_SLICE_RANGE_LEVELS
+/// 등 소비자 쪽 사다리와 그대로 대응된다(0=Build, 1=Balanced, 2=Game).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkloadProfile {
+    Build,
+    Balanced,
+    Game,
+}
+
+impl WorkloadProfile {
+    fn from_level(level: usize) -> Self {
+        match level {
+            0 => WorkloadProfile::Build,
+            1 => WorkloadProfile::Balanced,
+            _ => WorkloadProfile::Game,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            WorkloadProfile::Build => "빌드",
+            WorkloadProfile::Balanced => "균형",
+            WorkloadProfile::Game => "게임",
+        }
+    }
+}
+
+/// ST-4 판단 사다리 — 0=빌드(CPU바운드 우세), 2=게임(인터랙티브 우세, 기존
+/// 하드코딩 값 1~4와 동일한 baseline).
+const WORKLOAD_PROFILE_BASELINE_LEVEL: usize = 2;
+/// (High 분류 수 - Low 분류 수) EMA(×10)가 이 이상이면 "인터랙티브 우세"
+/// → 게임 프로파일 방향으로 한 단계 이동
+const WORKLOAD_BIAS_HIGH: i64 = 2;
+/// 이 이하이면 "CPU바운드 우세" → 빌드 프로파일 방향으로 한 단계 이동
+const WORKLOAD_BIAS_LOW: i64 = -2;
+/// 이 미만의 (High+Low 분류 수)는 표본 부족 — 프로파일 판단 보류
+const WORKLOAD_PROFILE_SAMPLE_MIN: u32 = 2;
+
+// ── ST-3: TIME_SLICE 허용 범위 동적화 — 이제 ST-4가 감지한 프로파일을
+// 그대로 소비하는 단순 매핑만 담당(판단 로직은 ST-4로 이전됨).
+//
+// PE-4에서 확인된 "레이턴시 4.5배 개선 vs 처리량 9배 희생" 트레이드오프를
+// 완화하기 위해, TIME_SLICE_MIN/MAX 범위 자체를 워크로드 프로파일에 맞춰
+// 선택한다.
+/// (min, max) 3단계 사다리: 0=빌드 모드(좁게, 처리량 우선), 2=게임 모드
+/// (넓게, 반응성 우선 — 기존 하드코딩 값 1~4와 동일)
+const TIME_SLICE_RANGE_LEVELS: [(u64, u64); 3] = [(2, 3), (1, 3), (1, 4)];
+
 /// 한 리포트 창당 최대 신규 채널 생성 수
 const MAX_CHANNELS_PER_WINDOW: u8 = 2;
 /// 채널 회수(이상/decay) 후 재생성 금지 기간 (틱 단위, ≈2창)
@@ -313,6 +395,11 @@ pub struct PolicyEngine {
     switch_rate_ema: u64,
     /// ST-1: REPORT_INTERVAL_LEVELS 내 현재 인덱스 (Hysteresis 상태)
     report_interval_level: usize,
+    /// ST-4: (High 분류 수 - Low 분류 수) EMA (×10 고정소수점) — 워크로드 프로파일 판단 신호
+    workload_bias_ema: i64,
+    /// ST-4: WorkloadProfile 사다리 내 현재 인덱스 (Hysteresis 상태).
+    /// ST-3(TIME_SLICE 범위)는 이 값을 그대로 읽어서 범위를 고른다.
+    workload_profile_level: usize,
 }
 
 impl PolicyEngine {
@@ -334,6 +421,8 @@ impl PolicyEngine {
             switches_this_window: 0,
             switch_rate_ema: 0,
             report_interval_level: REPORT_INTERVAL_BASELINE_LEVEL,
+            workload_bias_ema: 0,
+            workload_profile_level: WORKLOAD_PROFILE_BASELINE_LEVEL,
         }
     }
 
@@ -403,8 +492,23 @@ impl PolicyEngine {
                     switch_in_count: 0,
                     pri_cooldown: 0,
                     vol_ema: 500,
+                    alpha_level: ALPHA_BASELINE_LEVEL as u8,
+                    prev_vol_10: 500,
+                    volatility_ema: 0,
                 };
             }
+        }
+    }
+
+    /// ST-3 버그 수정 (실험 24 후속): kill_pid()가 지금까지 Policy Engine에
+    /// 통보되지 않아, 죽은 프로세스의 stats 슬롯이 active=true로 영원히 남아
+    /// 매 리포트 창마다 죽기 직전의 Priority(대개 High)로 계속 재분류되고
+    /// 있었다. 그 결과 cnt_high가 구조적으로 절대 줄어들지 않아 ST-3의
+    /// "빌드모드로 좁히기" 방향이 트리거될 수 없었다 — 실험 24의 "baseline
+    /// 비대칭" 가설은 부분적으로만 맞았고, 진짜 원인은 이 stale-slot 누수였다.
+    pub fn unregister(&mut self, pid: Pid) {
+        if let Some(idx) = self.find_slot(pid) {
+            self.stats[idx].active = false;
         }
     }
 
@@ -577,6 +681,9 @@ impl PolicyEngine {
         let window    = self.report_interval.max(1);
         let old_slice = TIME_SLICE.load(Ordering::Relaxed);
         let mut max_pct: u64 = 0;
+        // ST-3: 이번 창에서 High/Low로 분류된 프로세스 수 (워크로드 성격 판단용)
+        let mut cnt_high: u32 = 0;
+        let mut cnt_low: u32 = 0;
 
         // ── ST-1: 평가 주기(report_interval) 동적화 — 안정화 버전 (실험 22) ────
         // "관찰 → 판단 → 조정 → 검증": 방금 끝난 창의 컨텍스트 스위치 빈도를 보고
@@ -620,7 +727,7 @@ impl PolicyEngine {
                 self.report_interval = REPORT_INTERVAL_LEVELS[self.report_interval_level];
 
                 if self.report_interval != old_interval {
-                    crate::tracer::param_tuned(1, old_interval, self.report_interval);
+                    crate::tracer::param_tuned(1, 0, old_interval, self.report_interval);
                     crate::serial_println!(
                         "[policy-ST1] 평가 주기 조정: {}→{}틱 (EMA스위치율={}.{}/틱, raw={}.{}/틱, 전체스위치={})",
                         old_interval, self.report_interval,
@@ -657,9 +764,55 @@ impl PolicyEngine {
                 (vol * 1000) / total_sched // vol_pct × 10
             };
 
-            // EMA 갱신: α=0.3
-            let new_ema = (3 * cur_vol_10 + 7 * self.stats[i].vol_ema) / 10;
+            // ST-2: EMA α 동적화 — 현재 alpha_level(이전 창까지 결정된 상태)로
+            // 이번 창의 vol_ema를 갱신. 기존엔 3(=0.3) 고정이었던 분자를
+            // ALPHA_LEVELS[alpha_level]로 대체.
+            let alpha_num = ALPHA_LEVELS[self.stats[i].alpha_level as usize];
+            let new_ema = (alpha_num * cur_vol_10 + (10 - alpha_num) * self.stats[i].vol_ema) / 10;
             self.stats[i].vol_ema = new_ema;
+
+            // ST-2: 다음 창에 쓸 alpha_level 결정 — ST-1과 동일한 3중 안전장치
+            // (Hysteresis + EMA 평활화 + 표본 부족 유보).
+            if total_sched >= ALPHA_SAMPLE_MIN {
+                let delta = cur_vol_10.abs_diff(self.stats[i].prev_vol_10);
+                self.stats[i].prev_vol_10 = cur_vol_10;
+
+                // 2) EMA 평활화 — 변동성 자체의 노이즈를 흡수 (다른 신호와 동일 α=0.3)
+                let new_vol_ema = (3 * delta * 10 + 7 * self.stats[i].volatility_ema) / 10;
+                self.stats[i].volatility_ema = new_vol_ema;
+
+                let target_level: usize = if new_vol_ema >= VOLATILITY_HIGH_X10 {
+                    ALPHA_LEVELS.len() - 1 // 행동 급변 — α를 최대한 높여 빠르게 반응
+                } else if new_vol_ema <= VOLATILITY_LOW_X10 {
+                    0 // 행동 안정 — α를 최소로 낮춰 노이즈 억제
+                } else {
+                    ALPHA_BASELINE_LEVEL
+                };
+
+                // 1) Hysteresis — 목표가 멀어도 창당 ±1단계만 이동 (직행 금지)
+                let cur_level = self.stats[i].alpha_level as usize;
+                let next_level = if target_level > cur_level {
+                    cur_level + 1
+                } else if target_level < cur_level {
+                    cur_level - 1
+                } else {
+                    cur_level
+                };
+                if next_level != cur_level {
+                    self.stats[i].alpha_level = next_level as u8;
+                    crate::tracer::param_tuned(
+                        2, pid as u32,
+                        ALPHA_LEVELS[cur_level], ALPHA_LEVELS[next_level],
+                    );
+                    crate::serial_println!(
+                        "[policy-ST2] pid{} α 조정: 0.{}→0.{} (변동성EMA={}.{}‰, delta={})",
+                        pid, ALPHA_LEVELS[cur_level], ALPHA_LEVELS[next_level],
+                        new_vol_ema / 10, new_vol_ema % 10, delta,
+                    );
+                }
+            }
+            // 3) 표본 부족(total_sched < ALPHA_SAMPLE_MIN) — volatility_ema/alpha_level/
+            //    prev_vol_10 모두 갱신하지 않고 이전 값 유지 (판단 자체를 보류)
 
             let new_pri = if new_ema >= 600 {
                 Priority::High   // vol ≥ 60% → I/O바운드
@@ -711,15 +864,71 @@ impl PolicyEngine {
                 recommended_core.name(),
             );
 
+            if new_pri == Priority::High { cnt_high += 1; }
+            if new_pri == Priority::Low  { cnt_low  += 1; }
+
             if recent_pct > max_pct { max_pct = recent_pct; }
             self.stats[i].recent_ticks = 0;
         }
 
-        // BETA-X-2 6: TIME_SLICE 동적 조정 — 안전 한도 [TIME_SLICE_MIN, TIME_SLICE_MAX] 적용
+        // ── ST-4: WorkloadProfile 자동 감지 (ST-1/2/3과 동일한 3중 안전장치) ────
+        // "지금이 게임/빌드/균형 중 무엇인가"를 판단하는 로직 자체는 여기서
+        // 끝난다 — 판단된 프로파일을 실제로 무엇에 쓸지(TIME_SLICE 범위 등)는
+        // 아래 ST-3 블록처럼 별도 소비자가 결정한다.
+        let old_profile_level = self.workload_profile_level;
+        if is_enabled() {
+            if (cnt_high + cnt_low) >= WORKLOAD_PROFILE_SAMPLE_MIN {
+                let bias = cnt_high as i64 - cnt_low as i64; // + 인터랙티브 우세, - CPU바운드 우세
+                let new_bias_ema = (3 * bias * 10 + 7 * self.workload_bias_ema) / 10; // 2) EMA 평활화
+                self.workload_bias_ema = new_bias_ema;
+
+                let target_level: usize = if new_bias_ema >= WORKLOAD_BIAS_HIGH * 10 {
+                    2 // Game 방향
+                } else if new_bias_ema <= WORKLOAD_BIAS_LOW * 10 {
+                    0 // Build 방향
+                } else {
+                    WORKLOAD_PROFILE_BASELINE_LEVEL
+                };
+
+                // 1) Hysteresis — 창당 ±1단계만 이동
+                self.workload_profile_level = if target_level > old_profile_level {
+                    old_profile_level + 1
+                } else if target_level < old_profile_level {
+                    old_profile_level - 1
+                } else {
+                    old_profile_level
+                };
+
+                if self.workload_profile_level != old_profile_level {
+                    let old_profile = WorkloadProfile::from_level(old_profile_level);
+                    let new_profile = WorkloadProfile::from_level(self.workload_profile_level);
+                    crate::tracer::param_tuned(
+                        4, 0,
+                        old_profile_level as u64,
+                        self.workload_profile_level as u64,
+                    );
+                    crate::serial_println!(
+                        "[policy-ST4] 워크로드 프로파일 감지: {}→{} \
+                         (편향EMA={}.{}, high={} low={})",
+                        old_profile.name(), new_profile.name(),
+                        new_bias_ema / 10, new_bias_ema.rem_euclid(10), cnt_high, cnt_low,
+                    );
+                }
+            }
+            // 3) 표본 부족(cnt_high+cnt_low < WORKLOAD_PROFILE_SAMPLE_MIN) — 판단 보류
+        } else {
+            self.workload_profile_level = WORKLOAD_PROFILE_BASELINE_LEVEL;
+        }
+
+        // ── ST-3: TIME_SLICE 허용 범위 동적화 — ST-4가 감지한 프로파일을
+        // 그대로 소비하는 매핑만 수행 (판단 로직은 위 ST-4 블록 소유).
+        let (time_slice_min, time_slice_max) = TIME_SLICE_RANGE_LEVELS[self.workload_profile_level];
+
+        // BETA-X-2 6: TIME_SLICE 동적 조정 — 안전 한도 [time_slice_min, time_slice_max] 적용
         // PE-4: off 상태에서는 BASELINE_TIME_SLICE로 고정 (BETA 이전 정적 스케줄러 동등)
         let new_slice: u64 = if is_enabled() {
             let raw_slice: u64 = if max_pct >= 70 { 1 } else if max_pct >= 40 { 2 } else { 3 };
-            raw_slice.max(TIME_SLICE_MIN).min(TIME_SLICE_MAX)
+            raw_slice.max(time_slice_min).min(time_slice_max)
         } else {
             BASELINE_TIME_SLICE
         };
@@ -728,7 +937,7 @@ impl PolicyEngine {
         }
         crate::serial_println!(
             "[policy]    slice={}틱  (최고 점유 {}%, 범위={}-{}틱, PE={})",
-            new_slice, max_pct, TIME_SLICE_MIN, TIME_SLICE_MAX,
+            new_slice, max_pct, time_slice_min, time_slice_max,
             if is_enabled() { "ON" } else { "OFF" },
         );
 
@@ -1343,6 +1552,11 @@ pub fn init() {
 
 pub fn register_pid(pid: Pid) {
     unsafe { (*core::ptr::addr_of_mut!(ENGINE)).register(pid); }
+}
+
+/// ST-3 버그 수정: 프로세스가 죽을 때 Policy Engine의 stats 슬롯도 비활성화.
+pub fn unregister_pid(pid: Pid) {
+    unsafe { (*core::ptr::addr_of_mut!(ENGINE)).unregister(pid); }
 }
 
 pub fn on_switch(from: Pid, to: Pid, tick: u64) {

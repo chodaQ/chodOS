@@ -1,5 +1,5 @@
-   0.054486625s  INFO prepare_target{force=false package_id=kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel) target="kernel"}: cargo::core::compiler::fingerprint: fingerprint error for kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel)/Check { test: true }/TargetInner { name: "kernel", doc: true, ..: with_path("/Users/a.../Desktop/무무무무제폴더/kernel/src/main.rs", Edition2021) }
-   0.054513750s  INFO prepare_target{force=false package_id=kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel) target="kernel"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/a.../Desktop/무무무무제폴더/kernel/target/x86_64-unknown-none/debug/.fingerprint/kernel-48d57b2c3e11318f/test-bin-kernel`
+   0.198513208s  INFO prepare_target{force=false package_id=kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel) target="kernel"}: cargo::core::compiler::fingerprint: fingerprint error for kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel)/Check { test: true }/TargetInner { name: "kernel", doc: true, ..: with_path("/Users/a.../Desktop/무무무무제폴더/kernel/src/main.rs", Edition2021) }
+   0.198758042s  INFO prepare_target{force=false package_id=kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel) target="kernel"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/a.../Desktop/무무무무제폴더/kernel/target/x86_64-unknown-none/debug/.fingerprint/kernel-48d57b2c3e11318f/test-bin-kernel`
 
 Caused by:
     No such file or directory (os error 2)
@@ -22,10 +22,5 @@ Stack backtrace:
   14: std::rt::lang_start::<()>::{closure#0}
   15: std::rt::lang_start_internal
   16: _main
-   0.068518625s  INFO prepare_target{force=false package_id=kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel) target="kernel"}: cargo::core::compiler::fingerprint: stale: changed "/Users/a.../Desktop/무무무무제폴더/kernel/src/process/ipc_cap.rs"
-   0.068524375s  INFO prepare_target{force=false package_id=kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel) target="kernel"}: cargo::core::compiler::fingerprint:           (vs) "/Users/a.../Desktop/무무무무제폴더/kernel/target/x86_64-unknown-none/debug/.fingerprint/kernel-03da472cf33da8ff/dep-bin-kernel"
-   0.068526750s  INFO prepare_target{force=false package_id=kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel) target="kernel"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 1782546966, nanos: 813241455 } < FileTime { seconds: 1782633296, nanos: 2334418 }
-   0.069442875s  INFO prepare_target{force=false package_id=kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel) target="kernel"}: cargo::core::compiler::fingerprint: fingerprint dirty for kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel)/Check { test: false }/TargetInner { name: "kernel", doc: true, ..: with_path("/Users/a.../Desktop/무무무무제폴더/kernel/src/main.rs", Edition2021) }
-   0.069457667s  INFO prepare_target{force=false package_id=kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel) target="kernel"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: "/Users/a.../Desktop/무무무무제폴더/kernel/target/x86_64-unknown-none/debug/.fingerprint/kernel-03da472cf33da8ff/dep-bin-kernel", reference_mtime: FileTime { seconds: 1782546966, nanos: 813241455 }, stale: "/Users/a.../Desktop/무무무무제폴더/kernel/src/process/ipc_cap.rs", stale_mtime: FileTime { seconds: 1782633296, nanos: 2334418 } }))
     Checking kernel v0.1.0 (/Users/a.../Desktop/무무무무제폴더/kernel)
-error: could not compile `kernel` (bin "kernel" test) due to 1 previous error; 1 warning emitted
+error: could not compile `kernel` (bin "kernel" test) due to 1 previous error; 7 warnings emitted

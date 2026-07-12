@@ -101,6 +101,11 @@ impl Scheduler {
     }
 
     /// 프로세스를 Dead로 표시 (스케줄러가 이후 건너뜀)
+    ///
+    /// ST-3 버그 수정 (실험 24 후속): 죽은 프로세스를 Policy Engine에도
+    /// 통보해 stats 슬롯을 비활성화한다. 그렇지 않으면 죽기 직전의
+    /// Priority(대개 High)로 영원히 재분류되어 cnt_high가 구조적으로
+    /// 줄어들지 않는 누수가 생긴다 (자세한 내용은 policy::unregister 주석 참고).
     pub fn kill(&mut self, pid: Pid) {
         for proc in self.processes.iter_mut() {
             if proc.pid == pid {
@@ -108,6 +113,7 @@ impl Scheduler {
                 break;
             }
         }
+        crate::policy::unregister_pid(pid);
     }
 
     /// 현재 프로세스를 Dead로 표시하고 다음 프로세스 RSP 반환.
@@ -115,9 +121,11 @@ impl Scheduler {
     /// 반드시 ISR 컨텍스트(인터럽트 비활성 상태)에서 호출해야 함.
     /// 반환값을 `rsp`로 설정하고 `iretq`로 복귀하면 다음 프로세스로 전환됨.
     pub fn exit_current(&mut self, current_rsp: u64) -> u64 {
+        let pid = self.processes[self.current].pid;
         self.processes[self.current].state = ProcessState::Dead;
         self.processes[self.current].preempt_rsp = current_rsp;
         self.remaining_quanta = 0;
+        crate::policy::unregister_pid(pid); // kill()과 동일한 stale-slot 방지
         self.switch_to_next(current_rsp, true)
     }
 
