@@ -89,3 +89,15 @@ pub fn recommend_idle(idle_pct: u64) -> IdleMode {
     else if idle_pct >= 30 { IdleMode::Hlt }
     else { IdleMode::Active }
 }
+
+/// ST-4 확장: WorkloadProfile을 반영한 idle 권고.
+///
+/// `bias`는 실제 유휴율에 더해지는 보정치(퍼센트 포인트) — 게임 프로파일은
+/// 음수 bias로 "덜 유휴한 것처럼" 보이게 해 깊은 절전(MWAIT)에 덜 들어가고
+/// (README "게임 실행됨 → 성능 모드" 비전), 빌드 프로파일은 양수 bias로
+/// 더 쉽게 절전에 들어가게 한다(백그라운드 처리량 작업은 복귀 지연에 둔감).
+/// 균형 프로파일은 bias=0 → 기존 `recommend_idle`과 동일.
+pub fn recommend_idle_profiled(idle_pct: u64, bias: i64) -> IdleMode {
+    let adjusted = (idle_pct as i64 + bias).clamp(0, 100) as u64;
+    recommend_idle(adjusted)
+}

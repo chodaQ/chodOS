@@ -330,6 +330,30 @@ impl WorkloadProfile {
             WorkloadProfile::Game => "게임",
         }
     }
+
+    /// PE-2 확장: 이 프로파일이 idle 권고(`power::recommend_idle_profiled`)에
+    /// 주는 유휴율 보정치(퍼센트 포인트). 게임=-15(깊은 절전 진입 억제),
+    /// 빌드=+15(절전 진입 촉진), 균형=0(기존 동작과 동일).
+    fn idle_bias(self) -> i64 {
+        match self {
+            WorkloadProfile::Game => -15,
+            WorkloadProfile::Build => 15,
+            WorkloadProfile::Balanced => 0,
+        }
+    }
+
+    /// PE-3 확장: Normal 우선순위 프로세스를 이 프로파일에서 어느 코어
+    /// 타입으로 보낼지. 게임 중에는 Normal도 P-core 쪽으로 당겨 프레임
+    /// 드랍을 줄이고, 빌드 중에는 E-core로 몰아 처리량을 우선한다.
+    /// High/Low는 기존 `recommend_core_for_priority`가 이미 명확히
+    /// 결정하므로 이 보정은 Normal에만 적용된다.
+    fn normal_core_hint(self) -> crate::smp::CoreType {
+        match self {
+            WorkloadProfile::Game => crate::smp::CoreType::PCore,
+            WorkloadProfile::Build => crate::smp::CoreType::ECore,
+            WorkloadProfile::Balanced => crate::smp::CoreType::Unknown,
+        }
+    }
 }
 
 /// ST-4 판단 사다리 — 0=빌드(CPU바운드 우세), 2=게임(인터랙티브 우세, 기존
@@ -745,9 +769,21 @@ impl PolicyEngine {
             "[policy] ── CPU 리포트 (tick={}, slice={}틱) ──", tick, old_slice
         );
 
+        // PE-2 버그 수정(실험 29): 이 루프 끝에서 각 프로세스의 recent_ticks를
+        // 0으로 리셋한다(아래 `self.stats[i].recent_ticks = 0;`). 기존 Policy
+        // B-2(전력 리포트) 블록은 이 루프가 끝난 "이후"에 recent_ticks를 다시
+        // 합산해 busy_ticks를 구했는데, 그 시점엔 이미 전부 0으로 리셋된
+        // 뒤라 busy_ticks가 항상 0에 가까웠다 — idle_pct_raw가 실제 부하와
+        // 무관하게 거의 100%로 고정되고, EMA만 초기값(50%)에서 100%로
+        // 수렴하는 것처럼 보였다(관측된 65→75→82→...→99% 램프는 실제 유휴
+        // 변화가 아니라 이 순수한 EMA 수렴 곡선이었음). 여기서 리셋 전에
+        // kernel_main(pid=0) 제외 recent_ticks 합을 미리 스냅샷해 아래
+        // Policy B-2 블록에 넘긴다.
+        let mut busy_ticks_snapshot: u64 = 0;
         for i in 0..MAX_PROCS {
             if !self.stats[i].active { continue; }
             let pid = self.stats[i].pid;
+            if pid != 0 { busy_ticks_snapshot += self.stats[i].recent_ticks; }
 
             let recent_pct = (self.stats[i].recent_ticks * 100) / window;
             let total_pct  = if tick > 0 { (self.stats[i].ticks_run * 100) / tick } else { 0 };
@@ -851,7 +887,17 @@ impl PolicyEngine {
             // PE-3: 코어 특성 감지 — 우선순위 기반 P-core/E-core 권고
             // QEMU TCG는 Hybrid CPUID를 지원하지 않아 실제 배치 효과는
             // 관측되지 않지만(detect_core_type()이 항상 Unknown), 구조는 완성.
-            let recommended_core = crate::smp::recommend_core_for_priority(new_pri);
+            // ST-4 확장: High/Low는 우선순위만으로 이미 명확하므로 그대로
+            // 두고, 애매한 Normal만 지난 창에 감지된 WorkloadProfile로
+            // 보정한다(게임→P-core 쪽, 빌드→E-core 쪽). 이 판단 시점에서
+            // workload_profile_level은 "이번 창"이 아직 갱신 전이라 한 창
+            // 지연된(lag-1) 값을 쓰는 셈 — ST-3의 range 매핑과 달리 이
+            // 루프는 profile 갱신 블록보다 앞서 실행되기 때문.
+            let recommended_core = if new_pri == Priority::Normal {
+                WorkloadProfile::from_level(self.workload_profile_level).normal_core_hint()
+            } else {
+                crate::smp::recommend_core_for_priority(new_pri)
+            };
 
             crate::serial_println!(
                 "[policy]   pid={} {:12}: 최근{:3}% 누적{:3}%  vol_ema={:4}‰  → {} (코어권고={})",
@@ -1124,12 +1170,11 @@ impl PolicyEngine {
         // ── Policy B-2: 전력 상태 리포트 ──────────────────────────────────────
         {
             let window = self.report_interval.max(1);
-            // busy_ticks: kernel_main(pid=0) 제외 모든 프로세스의 최근 실행 틱 합
-            let mut busy_ticks: u64 = 0;
-            for i in 0..MAX_PROCS {
-                if !self.stats[i].active || self.stats[i].pid == 0 { continue; }
-                busy_ticks += self.stats[i].recent_ticks;
-            }
+            // busy_ticks: kernel_main(pid=0) 제외 모든 프로세스의 최근 실행 틱 합.
+            // 실험 29 버그 수정 전에는 여기서 self.stats[i].recent_ticks를 다시
+            // 합산했는데, 위 per-process 루프가 이미 전부 0으로 리셋한 뒤라
+            // 항상 busy_ticks≈0이었다. 이제는 리셋 전에 스냅샷한 값을 그대로 쓴다.
+            let busy_ticks = busy_ticks_snapshot;
             let idle_ticks = window.saturating_sub(busy_ticks.min(window));
             let idle_pct_raw = (idle_ticks * 100) / window;
 
@@ -1146,10 +1191,15 @@ impl PolicyEngine {
             self.power.last_aperf = crate::power::read_aperf();
             self.power.last_mperf = crate::power::read_mperf();
 
-            let idle_mode = crate::power::recommend_idle(idle_display);
+            // ST-4 확장: 이번 창에 이미 갱신된 WorkloadProfile로 idle 권고를
+            // 보정 — 게임 프로파일은 깊은 절전(MWAIT) 진입을 억제해 반응성을
+            // 지키고, 빌드 프로파일은 더 쉽게 절전에 들어가게 한다
+            // (README "게임 실행됨 → 성능 모드" 비전, PE-2 최초 구현 확장).
+            let profile = WorkloadProfile::from_level(self.workload_profile_level);
+            let idle_mode = crate::power::recommend_idle_profiled(idle_display, profile.idle_bias());
             crate::serial_println!(
-                "[policy-P] 전력 상태: 유휴율={:3}% 주파수활용={:3}% → 권고={}",
-                idle_display, freq_pct, idle_mode.name(),
+                "[policy-P] 전력 상태: 유휴율={:3}% 주파수활용={:3}% 프로파일={} → 권고={}",
+                idle_display, freq_pct, profile.name(), idle_mode.name(),
             );
             if freq_pct == 0 && self.power.last_mperf == 0 {
                 crate::serial_println!(

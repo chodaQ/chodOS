@@ -433,6 +433,34 @@ pub extern "C" fn _start() -> ! {
     process::scheduler::kill_pid(pf);
     serial_println!("[sched] ST-3 검증 워크로드 종료. Continuing...\n");
 
+    // ── 8-2. PE-2 게임 프로파일 경계값 검증(실험 29 후속) ──────────────────
+    // 실험 29는 빌드 프로파일 경계(유휴 64%→bias+15→79%→MWAIT)만 실측했고,
+    // 게임 프로파일 쪽 경계(유휴 70%+ & 게임)는 이번까지 두 벤치마크
+    // (task_a/b 동시구간, GUI 렌더링 구간) 모두 CPU를 계속 점유하고 있어서
+    // 관측되지 않았다. sender/receiver(IPC + voluntary yield, CPU 홀드
+    // 시간이 짧음)만 단독으로 오래 돌려 "게임 실행 중이지만 대부분 대기
+    // 상태"인 상황을 재현한다 — CPU바운드 프로세스가 전혀 없으므로
+    // High/Low 분류표에는 IPC 프로세스만 잡혀 워크로드 프로파일이 게임
+    // 쪽(baseline)에 머무는 동안 실제 유휴율이 얼마나 올라가는지 관찰한다.
+    serial_println!("===========================================");
+    serial_println!("  PE-2 게임 프로파일 경계값 검증 (실험 29 후속)");
+    serial_println!("  (CPU바운드 프로세스 없음 — IPC만 단독 실행)");
+    serial_println!("===========================================");
+
+    let sid2 = process::scheduler::alloc_pid();
+    process::scheduler::spawn(process::Process::new(sid2, "sender2", proc_sender));
+    let rid2 = process::scheduler::alloc_pid();
+    process::scheduler::spawn(process::Process::new(rid2, "receiver2", proc_receiver));
+
+    let pe2_start_tick = interrupts::handlers::TICK.load(Ordering::Relaxed);
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - pe2_start_tick < 300 {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+
+    process::scheduler::kill_pid(sid2);
+    process::scheduler::kill_pid(rid2);
+    serial_println!("[sched] PE-2 게임 프로파일 경계값 검증 종료. Continuing...\n");
+
     // ── 9. ext4 데모 (ALPHA 8) ────────────────────────────────────────────
     serial_println!("===========================================");
     serial_println!("  ALPHA 8: ext4 Disk Image");

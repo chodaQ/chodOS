@@ -6,7 +6,7 @@
     { "phase": "ML",      "status": "done", "label": "1–4 완료 (ML4 AND 87%) ✓" },
     { "phase": "Phase D", "status": "done", "label": "BETA 19~21 완료 ✓ — musl 동적 링킹 end-to-end" },
     { "phase": "PE 1-5",  "status": "done", "label": "Policy Engine 확장 완료 ✓ — 메모리·전력·코어·A/B·CFS비교" },
-    { "phase": "Self-Tuning", "status": "in_progress", "label": "ST-1~4 완료 — ST-5는 벤치마크가 짧아 가설 기각, 장기 벤치마크 재설계는 보류" }
+    { "phase": "Self-Tuning", "status": "in_progress", "label": "ST-1~4 완료, PE-2/PE-3 확장 완료, PE-2 stale-metric 버그 수정+빌드측 경계값 실측 완료 — ST-5(장기 A/B) 보류, 게임측 경계값은 다음 과제" }
   ],
   "stats": {
     "ipc":  "32×",
@@ -39,7 +39,12 @@
     { "status": "done", "label": "ST-2: EMA α 동적화", "detail": "프로세스별 vol_ema 변동성 기반 α 0.1~0.5 자동 조정(5단계 사다리), 동일 3중 안전장치 재사용 — 실험 23에서 진동 없이 안정 수렴 확인. 단 '급변→α상승' 방향은 이번 워크로드에서 미관측(한계로 기록)", "phase": "Self-Tuning" },
     { "status": "done", "label": "ST-3: TIME_SLICE 범위 동적화", "detail": "High/Low 분류 비율(워크로드 성격) 기반 범위 3단계 사다리(2~3/1~3/1~4) 자동 조정, 동일 3중 안전장치 재사용 — 실험 24에서 '빌드모드 미트리거'를 baseline 비대칭 탓으로 결론 냈으나, 실험 25에서 재조사한 결과 진짜 원인은 kill_pid()가 Policy Engine에 죽음을 통보하지 않아 죽은 프로세스 stats가 영원히 High로 남는 stale-slot 버그였음(policy::unregister_pid 추가로 수정). CPU바운드 전용 워크로드로 1-4→1-3→2-3(빌드모드) 및 역방향 복귀 양방향 모두 실측 검증 완료", "phase": "Self-Tuning" },
     { "status": "done", "label": "ST-4: WorkloadProfile 자동 감지", "detail": "실험 27: ST-3에 박혀 있던 판단 로직을 WorkloadProfile enum(Build/Balanced/Game)으로 분리 — ST-4가 판단, ST-3는 결과를 소비해 TIME_SLICE 범위만 매핑. 실험 25와 동일 지점·동일 값에서 전환 재현되어 회귀 없음 확인. 다음 후보: PE-2/PE-3가 이 프로파일을 소비하도록 확장", "phase": "Self-Tuning" },
-    { "status": "in_progress", "label": "ST-5: A/B 비교 재측정", "detail": "실험 26: PE-4와 동일 워크로드로 재측정했으나 레이턴시/처리량 수치가 실험19와 오차범위 내 동일 — 가설 기각. 원인은 PE-4 워크로드(~37틱)가 report_interval baseline(36틱)과 거의 같아 ST-1/ST-3가 개입할 리포트 창이 사실상 1개뿐이었기 때문(Self-Tuning 무효가 아니라 벤치마크가 너무 짧음). HOG_TARGET_ITERS를 크게 늘린 장기 워크로드 재설계가 필요하나 사용자 지시로 보류(deferred) — ST-4를 먼저 진행", "phase": "Self-Tuning" },
+    { "status": "done", "label": "ST-4+: WorkloadProfile → PE-2/PE-3 확장", "detail": "실험 28: WorkloadProfile을 PE-2(idle C-state 권고)와 PE-3(Normal 우선순위 코어 권고)로 확장. power.rs에 recommend_idle_profiled(idle_pct, bias) 추가 — 게임=-15(깊은 절전 억제), 빌드=+15(절전 촉진), 균형=0. WorkloadProfile::normal_core_hint()로 애매한 Normal 우선순위만 게임→P-core/빌드→E-core로 보정(High/Low는 기존 로직 유지). 부팅 로그에서 유휴율82%+게임 프로파일이 baseline이면 MWAIT였을 것을 HLT로 강등하는 것을 직접 확인, Normal 코어권고가 프로파일 전환에 따라 P-core↔E-core로 바뀌는 것도 확인. PE-3 쪽은 판단 루프 순서상 lag-1(한 창 지연) 설계 — 코드 주석으로 명시", "phase": "Self-Tuning" },
+    { "status": "in_progress", "label": "ST-5: A/B 비교 재측정", "detail": "실험 26: PE-4와 동일 워크로드로 재측정했으나 레이턴시/처리량 수치가 실험19와 오차범위 내 동일 — 가설 기각. 원인은 PE-4 워크로드(~37틱)가 report_interval baseline(36틱)과 거의 같아 ST-1/ST-3가 개입할 리포트 창이 사실상 1개뿐이었기 때문(Self-Tuning 무효가 아니라 벤치마크가 너무 짧음). HOG_TARGET_ITERS를 크게 늘린 장기 워크로드 재설계가 필요하나 여전히 보류(deferred)", "phase": "Self-Tuning" },
+    { "status": "done", "label": "PE-2 stale-metric 버그 수정 + 경계값 재검증", "detail": "실험 29: 경계값 실측을 준비하다 idle_pct 계산 버그 발견 — Policy B-2가 idle 계산 시 per-process 루프가 이미 0으로 리셋한 recent_ticks를 재합산하고 있어 idle_pct_raw가 실제 부하와 무관하게 항상 ~100%로 수렴(실험 28의 '82%+게임→HLT' 관측은 이 버그의 부산물로 정정됨). 리셋 전 busy_ticks_snapshot을 미리 떠서 수정. 재검증 결과 유휴율이 실제 워크로드를 따라감을 확인, 빌드 프로파일 경계 케이스(실제 유휴64%+bias15→79%→MWAIT, 균형이면 HLT) 실측 성공. 게임 쪽 경계(유휴70%+&게임)는 이번 워크로드에서 미관측", "phase": "Self-Tuning" },
+    { "status": "blocked", "label": "PE-2 게임 프로파일 경계값 실측", "detail": "실험 30: IPC-only(sender/receiver, voluntary yield_now()) 워크로드로 재도전했으나 idle이 오히려 0%까지 떨어짐 — yield_now()는 협조적 컨텍스트 스위치일 뿐 CPU를 실제로 놀리지 않아, 항상 누군가 스케줄돼있으면 idle_pct(스케줄 여부 기반 지표)가 0에 가까워짐. 근본 원인은 워크로드 설계가 아니라 커널에 진짜 블로킹 sleep primitive가 없다는 것 — sleep_ticks(n) 같은 기능 추가가 선행돼야 재시도 가능. 큰 작업이라 별도 마일스톤 후보로 격상", "phase": "Self-Tuning" },
+    { "status": "todo", "label": "스케줄러 sleep/block primitive 추가", "detail": "실험 30에서 드러난 제약 — yield_now()만으로는 진짜 idle을 만들 수 없음. 프로세스를 ready 큐에서 완전히 빼는 sleep_ticks(n) 등을 스케줄러에 추가하면 PE-2 게임 경계값 실측뿐 아니라 idle_pct 지표 자체의 신뢰도도 개선됨", "phase": "Self-Tuning" },
+    { "status": "todo", "label": "PE-3 lag-1 영향 정량화", "detail": "프로파일 전환 직후 1개 창 동안 코어권고가 이전 프로파일 기준으로 나오는 lag-1 설계가 실제 배치에 영향을 주는지 측정 (QEMU TCG가 Hybrid CPUID 미지원이라 구조 검증 위주)", "phase": "Self-Tuning" },
     { "status": "todo", "label": "Phase E: 네트워크",  "detail": "smoltcp + DNS + TLS",            "phase": "Phase E"  }
   ]
 }
