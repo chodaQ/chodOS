@@ -23,7 +23,8 @@
       "Bash(objdump -d --start-address=0xffffffff8000c960 --stop-address=0xffffffff8000c9c0 kernel/target/x86_64-unknown-none/debug/kernel)",
       "Bash(timeout 40 make run)",
       "Bash(tee /private/tmp/claude-502/-Users-a----Desktop--------/7edd10f7-1979-43ff-a1de-0b60f25b2382/scratchpad/st1_stabilized_run.log)",
-      "Bash(python3 -m json.tool \"/Users/a.../Desktop/무무무무제폴더/progress.json\")"
+      "Bash(python3 -m json.tool \"/Users/a.../Desktop/무무무무제폴더/progress.json\")",
+      "Bash(sed -i.bak 's/const FAIRNESS_FLOOR_TICKS: u64 = 200;/const FAIRNESS_FLOOR_TICKS: u64 = u64::MAX;/' src/process/scheduler.rs *)"
     ]
   }
 }

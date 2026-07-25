@@ -110,7 +110,14 @@ pub fn run(label: &str) -> (u64, u64, u64) {
 
         if tick >= next_key_tick && KBD_IDX.load(Ordering::Relaxed) < N_SAMPLES {
             KBD_TRIGGER_TS.store(rdtsc(), Ordering::SeqCst);
-            crate::process::scheduler::keyboard_boost();
+            // 실험 33(CFS-1)에서 발견한 버그 수정: keyboard_boost()는 호출
+            // 시점의 self.current를 부스트하는데, 여기서는 kernel_main이
+            // 직접 호출하므로 kernel_main 자신이 부스트되고 있었다(실제
+            // IRQ1 핸들러라면 인터럽트당한 kbd_task가 self.current라 맞았을
+            // 것). WeightedPriority에서는 라운드로빈에 묻혀 안 드러났지만
+            // CFS는 weight 격차가 커서 kernel_main이 무기한 스케줄을
+            // 독점하는 형태로 즉시 드러남 — boost_pid(kbd_pid)로 명시.
+            crate::process::scheduler::boost_pid(kbd_pid, 8);
             next_key_tick = tick + KEYPRESS_INTERVAL_TICKS;
         }
 
@@ -145,6 +152,10 @@ pub fn run(label: &str) -> (u64, u64, u64) {
 
     crate::process::scheduler::kill_pid(hog_pid);
     crate::process::scheduler::kill_pid(kbd_pid);
+    // 실험 35: 이 함수가 반복 호출될 때(CFS-2 등) kernel_stack이 누적되며
+    // OOM으로 이어졌던 문제 수정 — 일반 컨텍스트(이 함수는 인터럽트 밖에서
+    // 호출됨)에서 바로 회수한다.
+    crate::process::scheduler::reap_dead();
 
     (avg_lat, switches_36, hog_ticks)
 }
@@ -170,26 +181,31 @@ fn trimmed_avg(samples: &[AtomicU64; N_SAMPLES]) -> u64 {
     sum / valid as u64
 }
 
-/// A/B 비교 리포트.
-pub fn report_ab(on: (u64, u64, u64), off: (u64, u64, u64)) {
+/// A/B 비교 리포트 (PE-4: on/off, CFS-1: WP/CFS 등 재사용).
+pub fn report_ab_labeled(title: &str, label_a: &str, a: (u64, u64, u64), label_b: &str, b: (u64, u64, u64)) {
     crate::serial_println!("[pe4] ══════════════════════════════════════════════");
-    crate::serial_println!("[pe4]  PE-4: Policy Engine A/B 비교 결과");
+    crate::serial_println!("[pe4]  {}", title);
     crate::serial_println!("[pe4] ──────────────────────────────────────────────");
     crate::serial_println!(
         "[pe4]  {:>18}  {:>12}  {:>12}",
-        "지표", "PE=ON", "PE=OFF",
+        "지표", label_a, label_b,
     );
     crate::serial_println!(
         "[pe4]  {:>18}  {:>10}cy  {:>10}cy",
-        "키입력 레이턴시", on.0, off.0,
+        "키입력 레이턴시", a.0, b.0,
     );
     crate::serial_println!(
         "[pe4]  {:>18}  {:>12}  {:>12}",
-        "ctx switch/36tick", on.1, off.1,
+        "ctx switch/36tick", a.1, b.1,
     );
     crate::serial_println!(
         "[pe4]  {:>18}  {:>10}tick  {:>10}tick",
-        "hog 완료 시간", on.2, off.2,
+        "hog 완료 시간", a.2, b.2,
     );
     crate::serial_println!("[pe4] ══════════════════════════════════════════════");
+}
+
+/// PE-4 전용 A/B 비교 리포트 (하위 호환 — 기존 호출부 유지).
+pub fn report_ab(on: (u64, u64, u64), off: (u64, u64, u64)) {
+    report_ab_labeled("PE-4: Policy Engine A/B 비교 결과", "PE=ON", on, "PE=OFF", off);
 }

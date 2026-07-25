@@ -147,6 +147,30 @@ pub struct Process {
     pub boost_ticks: u64,
     /// Ready 상태로 진입한 틱 (aging 대기 시간 측정, ALPHA 7)
     pub ready_since_tick: u64,
+
+    // ── sleep_ticks(n): 실험 30 후속, 진짜 블로킹 primitive ──────────────────
+    /// `sleep_ticks(n)` 호출 직후, 다음 voluntary yield에서 소비될 "요청된
+    /// 잠들 틱 수". 0이면 sleep 요청 없음(평소처럼 Ready로 전환).
+    /// yield_now()의 int 0x40 경로를 그대로 재사용하기 위해, 실제 인터럽트
+    /// 프레임 대신 이 필드에 값을 먼저 심어두고 yield_now()를 호출하는 방식
+    /// (별도 인터럽트 벡터/어셈블리 변경 불필요).
+    pub pending_sleep_ticks: u64,
+    /// Blocked 상태에서 깨어날 절대 틱(`TICK` 기준). 0이면 sleep 중이 아님.
+    pub wake_at_tick: u64,
+
+    // ── CFS-1: vruntime 기반 스케줄링(실험 33) ────────────────────────────────
+    /// 가상 실행시간 누적치. CFS 모드에서 "가장 작은 값을 가진 Ready
+    /// 프로세스를 고른다"의 기준. rdtsc 사이클 기반(TICK 기반이 아님 —
+    /// voluntary yield/sleep_ticks에서는 TICK이 안 늘어나므로, 실제 소비한
+    /// CPU 시간을 반영하려면 rdtsc가 필요, 실험 30~32에서 확인된 제약).
+    pub vruntime: u64,
+    /// 이 프로세스가 마지막으로 Running이 된 시점의 rdtsc 값.
+    pub run_start_ts: u64,
+
+    /// `reap()`이 이미 처리됐는지 (실험 35). `kernel_stack`을 더 이상
+    /// 비우지 않으므로 완료 여부를 별도로 표시 — 안 그러면 매 스캔마다
+    /// 같은 Dead 프로세스를 반복 재처리하게 됨.
+    pub reaped: bool,
     // ── ALPHA 9: Capability Handle Table ─────────────────────────────────────
     /// Linux fd ↔ Handle ↔ Capability<T> 연결 테이블
     pub handle_table: handle::HandleTable,
@@ -214,6 +238,11 @@ impl Process {
             voluntary_yields: 0,
             boost_ticks: 0,
             ready_since_tick: 0,
+            pending_sleep_ticks: 0,
+            wake_at_tick: 0,
+            vruntime: 0,
+            run_start_ts: 0,
+            reaped: false,
             handle_table: handle::HandleTable::new(),
             preferred_cpu: u8::MAX, // 미설정
             ipc_peer_pids: [0; 8],
@@ -234,11 +263,47 @@ impl Process {
             voluntary_yields: 0,
             boost_ticks: 0,
             ready_since_tick: 0,
+            pending_sleep_ticks: 0,
+            wake_at_tick: 0,
+            vruntime: 0,
+            run_start_ts: 0,
+            reaped: false,
             handle_table: handle::HandleTable::new(),
             preferred_cpu: 0, // kernel_main은 BSP(core 0) 고정
             ipc_peer_pids: [0; 8],
             ipc_peer_counts: [0; 8],
         }
+    }
+
+    /// Dead 상태로 전환된 프로세스가 점유 중이던 힙 자원 중 **안전하다고
+    /// 확인된 것만** 회수한다 (실험 34~35).
+    ///
+    /// PCB 슬롯 자체(`Scheduler::processes`의 원소)는 남겨둔다 — `self.current`
+    /// 등 여러 곳이 Vec 인덱스로 프로세스를 참조하므로 제거·재정렬은 범위 밖.
+    ///
+    /// **`kernel_stack`(64KB)은 의도적으로 회수하지 않는다.** 실험 35에서
+    /// 실측한 재현 가능한 버그 때문이다: 64KB 블록을 free한 뒤 곧바로 새
+    /// 프로세스가 그 자리(또는 인접 병합된 영역)를 재할당받아 쓰기 시작하면
+    /// #GP(General Protection Fault)로 죽는다. ISR 컨텍스트에서 힙을 건드리는
+    /// 재진입 문제인 줄 알고 회수 로직을 인터럽트 밖(`Scheduler::reap_dead()`,
+    /// 일반 실행 흐름)으로 옮겨봤지만 동일하게 재현됐다 — 즉 재진입이 아니라
+    /// "큰 블록을 free→즉시 재사용"이라는 경로 자체에 문제가 있다(할당자의
+    /// split/coalesce 로직 또는 이 커널의 힙 사용 방식에 있는 미해결 버그로
+    /// 추정, 실험 35에 기록). 근본 원인을 못 찾은 상태에서 성급히 free를
+    /// 강행하는 것보다, 위험한 경로 자체를 피하고 힙 크기를 늘려 여유를
+    /// 확보하는 쪽을 택했다("생성은 엄격하게, 사용은 가볍게" 원칙과 유사하게,
+    /// 확실하지 않은 최적화보다 안정성 우선). `message_queue`/`handle_table`은
+    /// 크기가 작고 안전성이 실측으로 확인돼 그대로 회수한다.
+    ///
+    /// **호출 시점 주의**: 자기 자신(`self.current`)을 reap하면 지금 실행
+    /// 중인 콜스택을 해제하는 use-after-free가 된다 — 항상 "다른" 프로세스만
+    /// 대상으로. (`kernel_stack`을 안 건드리므로 이번엔 실질적 위험은 아니지만
+    /// 원칙은 유지.)
+    pub fn reap(&mut self) {
+        // kernel_stack은 의도적으로 미회수 — 위 문서 주석 참고 (실험 35/37/38/39).
+        self.message_queue = VecDeque::new();
+        self.handle_table = handle::HandleTable::new();
+        self.reaped = true;
     }
 
     /// BETA-X 1: IPC 송신 카운터 갱신 — 수신자 PID별 누적 횟수 반환.

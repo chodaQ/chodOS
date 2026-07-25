@@ -101,6 +101,35 @@ fn proc_receiver() -> ! {
     }
 }
 
+// ==================== 실험 31: sleep_ticks(n) 기반 IPC 데모 ====================
+//
+// proc_sender/proc_receiver와 동일한 로직이지만 yield_now()(협조적 전환,
+// 여전히 Ready 상태 유지) 대신 sleep_ticks(4)(진짜 Blocked, 후보 탐색에서
+// 제외)를 쓴다. 실험 30에서 "IPC-only인데 idle_pct가 0%"였던 원인이
+// yield_now()의 한계였음을 검증하기 위한 대조군.
+fn proc_sender_sleepy() -> ! {
+    serial_println!("[sender3(sleepy) pid={}] started", process::scheduler::current_pid());
+    let mut counter: u64 = 0;
+    loop {
+        if counter < 10 {
+            process::ipc::send_u64(PID_RECEIVER, counter);
+            counter += 1;
+        }
+        process::scheduler::sleep_ticks(4);
+    }
+}
+
+fn proc_receiver_sleepy() -> ! {
+    serial_println!("[receiver3(sleepy) pid={}] started", process::scheduler::current_pid());
+    loop {
+        while let Some(msg) = process::ipc::recv() {
+            let value = process::ipc::msg_as_u64(&msg);
+            serial_println!("[receiver3(sleepy)] <- pid={} | counter={}", msg.sender, value);
+        }
+        process::scheduler::sleep_ticks(4);
+    }
+}
+
 // ==================== ALPHA M1: 선점형 스케줄러 데모 태스크 ====================
 //
 // 이 태스크들은 yield_now()를 호출하지 않는다.
@@ -328,6 +357,7 @@ pub extern "C" fn _start() -> ! {
     // IPC 데모 프로세스 종료 (Dead 표시 → 스케줄러가 건너뜀)
     process::scheduler::kill_pid(sid);
     process::scheduler::kill_pid(rid);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("--- IPC Demo complete ---\n");
 
     // ── 7. Zero-copy Capability IPC 데모 (ALPHA M2) ──────────────────────
@@ -397,6 +427,7 @@ pub extern "C" fn _start() -> ! {
     // 태스크 종료 (Dead 표시)
     process::scheduler::kill_pid(pa);
     process::scheduler::kill_pid(pb);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("[sched] task_a / task_b killed. Continuing...\n");
 
     // ── 8-1. ST-3 검증(실험 25): CPU바운드 전용 워크로드 ──────────────────
@@ -431,6 +462,7 @@ pub extern "C" fn _start() -> ! {
     process::scheduler::kill_pid(pd);
     process::scheduler::kill_pid(pe);
     process::scheduler::kill_pid(pf);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("[sched] ST-3 검증 워크로드 종료. Continuing...\n");
 
     // ── 8-2. PE-2 게임 프로파일 경계값 검증(실험 29 후속) ──────────────────
@@ -452,6 +484,11 @@ pub extern "C" fn _start() -> ! {
     let rid2 = process::scheduler::alloc_pid();
     process::scheduler::spawn(process::Process::new(rid2, "receiver2", proc_receiver));
 
+    // 실험 31에서 이 구간(순수 yield_now() busy-loop인 sender2/receiver2)이
+    // kernel_main을 무기한 굶기는 starvation 버그를 발견했었다(aging이 한
+    // 단계만 올라 Low/Normal이 영원히 Ready&High를 못 넘던 문제). 실험 32에서
+    // scheduler.rs의 FAIRNESS_FLOOR_TICKS(200틱 이상 대기 시 무조건 High로
+    // 강제 승격)로 수정 완료 — 이 구간도 이제 정상 종료된다.
     let pe2_start_tick = interrupts::handlers::TICK.load(Ordering::Relaxed);
     while interrupts::handlers::TICK.load(Ordering::Relaxed) - pe2_start_tick < 300 {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
@@ -459,7 +496,32 @@ pub extern "C" fn _start() -> ! {
 
     process::scheduler::kill_pid(sid2);
     process::scheduler::kill_pid(rid2);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("[sched] PE-2 게임 프로파일 경계값 검증 종료. Continuing...\n");
+
+    // ── 8-3. sleep_ticks(n) 검증 + PE-2 게임 경계값 재도전(실험 31) ─────────
+    // 실험 30 결론: yield_now()만으로는 idle_pct를 낮출 수 없다(협조적 전환일
+    // 뿐 Ready 상태 유지). 여기서는 동일한 IPC 워크로드를 sleep_ticks(4)로
+    // 바꿔서 진짜 Blocked 상태를 만든 뒤, 유휴율이 이번에는 올라가는지 —
+    // 그리고 유휴율 70%대에서 게임 프로파일이 MWAIT를 억제하는지 관찰한다.
+    serial_println!("===========================================");
+    serial_println!("  실험 31: sleep_ticks(n) 기반 게임 경계값 재도전");
+    serial_println!("===========================================");
+
+    let sid3 = process::scheduler::alloc_pid();
+    process::scheduler::spawn(process::Process::new(sid3, "sender3", proc_sender_sleepy));
+    let rid3 = process::scheduler::alloc_pid();
+    process::scheduler::spawn(process::Process::new(rid3, "receiver3", proc_receiver_sleepy));
+
+    let e31_start_tick = interrupts::handlers::TICK.load(Ordering::Relaxed);
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - e31_start_tick < 300 {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+
+    process::scheduler::kill_pid(sid3);
+    process::scheduler::kill_pid(rid3);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
+    serial_println!("[sched] 실험 31 워크로드 종료. Continuing...\n");
 
     // ── 9. ext4 데모 (ALPHA 8) ────────────────────────────────────────────
     serial_println!("===========================================");
@@ -1692,6 +1754,7 @@ pub extern "C" fn _start() -> ! {
     );
     process::scheduler::kill_pid(gfx_pid_val);
     process::scheduler::kill_pid(wm_pid_val);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("--- BETA-X 3 demo complete ---\n");
 
     // ── BETA-X 4: 마우스/키보드 → 포그라운드 앱 입력 경로 직통화 ─────────────
@@ -1731,6 +1794,7 @@ pub extern "C" fn _start() -> ! {
     process::scheduler::kill_pid(inp_consumer);
     process::scheduler::kill_pid(inp_drv);
     process::scheduler::kill_pid(key_gen);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("--- BETA-X 4 demo complete ---\n");
 
     // ── BETA-X 6: 채널 회수(Decay) ────────────────────────────────────────────
@@ -1775,6 +1839,7 @@ pub extern "C" fn _start() -> ! {
 
     process::scheduler::kill_pid(decay_recv);
     process::scheduler::kill_pid(decay_send);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("--- BETA-X 6 demo complete ---\n");
 
     // ── BETA-X 7: IPC 레이턴시 A/B 벤치마크 ─────────────────────────────────
@@ -1805,6 +1870,7 @@ pub extern "C" fn _start() -> ! {
 
     process::scheduler::kill_pid(b7_recv);
     process::scheduler::kill_pid(b7_send);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("--- BETA-X 7 demo complete ---\n");
 
     // ── Policy B: 메모리 압력 + 전력 신호 관찰 ──────────────────────────────
@@ -1833,6 +1899,7 @@ pub extern "C" fn _start() -> ! {
 
     // Phase 2: cpu_stress 종료 → 유휴율 상승 관찰
     process::scheduler::kill_pid(pb_cpu);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("[policy-B] Phase 2: cpu_stress 종료 → 유휴율 상승 관찰 중...");
     let pb2_start = interrupts::handlers::TICK.load(Ordering::Relaxed);
     while interrupts::handlers::TICK.load(Ordering::Relaxed) - pb2_start < 40 {
@@ -1841,6 +1908,7 @@ pub extern "C" fn _start() -> ! {
     serial_println!("[policy-B] Phase 2 완료 — 유휴율 변화 로그 확인\n");
 
     process::scheduler::kill_pid(pb_mem);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("--- Policy B demo complete ---\n");
 
     // ── BETA-X A-1: 페이로드 크기 스윕 ──────────────────────────────────────
@@ -1878,6 +1946,7 @@ pub extern "C" fn _start() -> ! {
 
     process::scheduler::kill_pid(a1_recv);
     process::scheduler::kill_pid(a1_send);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
     serial_println!("--- BETA-X A-1 complete ---\n");
 
     // ── BETA-X A-2: 멀티코어 레이턴시 비교 ──────────────────────────────────
@@ -1926,6 +1995,7 @@ pub extern "C" fn _start() -> ! {
 
         process::scheduler::kill_pid(a2_send);
         process::scheduler::kill_pid(a2_recv);
+        process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
 
         bench_a2::report();
     } else {
@@ -1948,6 +2018,124 @@ pub extern "C" fn _start() -> ! {
 
     bench_pe4::report_ab(pe_on, pe_off);
     serial_println!("--- PE-4 complete ---\n");
+
+    // ── CFS-1: 스케줄러 A/B 벤치마크 (실험 33) ───────────────────────────────
+    // PE-5(실험 19)에서 "Linux CFS가 처리량 희생 없이 비슷한 반응성을 달성 —
+    // MuKernel의 이진 High/Low 분류가 구조적 한계"라는 결론을 냈고, 실험
+    // 31/32에서 기존 weighted round-robin+aging이 구조적으로 starvation에
+    // 취약함을 실측 확인했다. vruntime 기반 CFS 모드가 별도 안전장치 없이도
+    // 이 문제를 구조적으로 해결하는지, PE-4와 동일한 워크로드로 비교한다.
+    // "이긴다"가 목표가 아니라 구조적 차이를 정직하게 기록하는 것이 목표.
+    serial_println!("===========================================");
+    serial_println!("  CFS-1: 스케줄러 A/B (WeightedPriority vs CFS, 실험 33)");
+    serial_println!("  워크로드: cpu_hog(배경) + kbd_task(전경, n={})", bench_pe4::N_SAMPLES);
+    serial_println!("===========================================");
+
+    process::scheduler::set_mode(process::scheduler::SchedMode::WeightedPriority);
+    let sched_wp = bench_pe4::run("WP    ");
+
+    process::scheduler::set_mode(process::scheduler::SchedMode::Cfs);
+    let sched_cfs = bench_pe4::run("CFS   ");
+    process::scheduler::set_mode(process::scheduler::SchedMode::WeightedPriority); // 이후 데모 원복
+
+    bench_pe4::report_ab_labeled(
+        "CFS-1: 스케줄러 A/B 비교 결과 (WeightedPriority vs CFS)",
+        "WP", sched_wp, "CFS", sched_cfs,
+    );
+    serial_println!("--- CFS-1 complete ---\n");
+
+    // ── CFS-2: 반복 시행 + starvation 재현 (실험 34) ─────────────────────────
+    // 실험 33(CFS-1)은 WP/CFS 각 1회씩만 돈 예비 비교였다. QEMU TCG 실행시간
+    // 변동성이 커서(같은 지점 도달까지 500~1500초 편차 관측) 그 결과가
+    // 노이즈인지 실제 패턴인지 확신할 수 없었다. 여기서는
+    // (a) 각 모드 n=3회씩 반복해 min/avg/max를 기록하고,
+    // (b) 실험 31/32 스타일 "Ready&High가 영원히 존재" starvation 워크로드를
+    //     CFS 모드로 직접 재현해 FAIRNESS_FLOOR_TICKS 없이도 정말 안전한지
+    //     검증한다 (CFS-1의 hog완료=1tick은 간접 증거였을 뿐, 이번이 정면
+    //     재현).
+    serial_println!("===========================================");
+    serial_println!("  CFS-2: 반복 시행(n=3) + starvation 재현 (실험 34)");
+    serial_println!("===========================================");
+
+    const CFS2_TRIALS: usize = 3;
+    let mut wp_trials: [(u64, u64, u64); CFS2_TRIALS] = [(0, 0, 0); CFS2_TRIALS];
+    let mut cfs_trials: [(u64, u64, u64); CFS2_TRIALS] = [(0, 0, 0); CFS2_TRIALS];
+
+    for i in 0..CFS2_TRIALS {
+        process::scheduler::set_mode(process::scheduler::SchedMode::WeightedPriority);
+        wp_trials[i] = bench_pe4::run("WP    ");
+    }
+    for i in 0..CFS2_TRIALS {
+        process::scheduler::set_mode(process::scheduler::SchedMode::Cfs);
+        cfs_trials[i] = bench_pe4::run("CFS   ");
+    }
+    process::scheduler::set_mode(process::scheduler::SchedMode::WeightedPriority); // 이후 데모 원복
+
+    fn trial_stats(trials: &[(u64, u64, u64)]) -> (u64, u64, u64, u64, u64, u64) {
+        let (mut lat_min, mut lat_max, mut lat_sum) = (u64::MAX, 0u64, 0u64);
+        let (mut hog_min, mut hog_max, mut hog_sum) = (u64::MAX, 0u64, 0u64);
+        for &(lat, _sw, hog) in trials {
+            lat_min = lat_min.min(lat); lat_max = lat_max.max(lat); lat_sum += lat;
+            hog_min = hog_min.min(hog); hog_max = hog_max.max(hog); hog_sum += hog;
+        }
+        let n = trials.len() as u64;
+        (lat_min, lat_max, lat_sum / n, hog_min, hog_max, hog_sum / n)
+    }
+
+    let (wp_lat_min, wp_lat_max, wp_lat_avg, wp_hog_min, wp_hog_max, wp_hog_avg) = trial_stats(&wp_trials);
+    let (cfs_lat_min, cfs_lat_max, cfs_lat_avg, cfs_hog_min, cfs_hog_max, cfs_hog_avg) = trial_stats(&cfs_trials);
+
+    serial_println!("[cfs2] ══════════════════════════════════════════════");
+    serial_println!("[cfs2]  CFS-2: 반복 시행 통계 (n={})", CFS2_TRIALS);
+    serial_println!("[cfs2] ──────────────────────────────────────────────");
+    serial_println!(
+        "[cfs2]  키입력 레이턴시(cy)  WP  min/avg/max = {}/{}/{}",
+        wp_lat_min, wp_lat_avg, wp_lat_max,
+    );
+    serial_println!(
+        "[cfs2]  키입력 레이턴시(cy)  CFS min/avg/max = {}/{}/{}",
+        cfs_lat_min, cfs_lat_avg, cfs_lat_max,
+    );
+    serial_println!(
+        "[cfs2]  hog 완료(tick)       WP  min/avg/max = {}/{}/{}",
+        wp_hog_min, wp_hog_avg, wp_hog_max,
+    );
+    serial_println!(
+        "[cfs2]  hog 완료(tick)       CFS min/avg/max = {}/{}/{}",
+        cfs_hog_min, cfs_hog_avg, cfs_hog_max,
+    );
+    serial_println!("[cfs2] ══════════════════════════════════════════════");
+
+    // ── CFS-2b: starvation 시나리오를 CFS로 직접 재현 ────────────────────────
+    // 실험 31/32와 완전히 동일한 패턴(yield_now() busy-loop sender/receiver,
+    // 절대 안 죽고 항상 Ready&High) — WeightedPriority였다면 FAIRNESS_FLOOR
+    // 없이는 kernel_main의 이 300틱 대기 루프가 무기한 안 끝난다(실측: 실험
+    // 31에서 8000+틱, 480초+ 동안 미종료). CFS는 이론상 안전장치 없이도
+    // starvation이 구조적으로 불가능해야 한다 — 이 루프가 정상 종료되는지
+    // 자체가 검증.
+    serial_println!("-------------------------------------------");
+    serial_println!("  CFS-2b: starvation 워크로드를 CFS로 재현 (실험 31/32와 동일 패턴)");
+    serial_println!("-------------------------------------------");
+
+    process::scheduler::set_mode(process::scheduler::SchedMode::Cfs);
+
+    let sid4 = process::scheduler::alloc_pid();
+    process::scheduler::spawn(process::Process::new(sid4, "sender4", proc_sender));
+    let rid4 = process::scheduler::alloc_pid();
+    process::scheduler::spawn(process::Process::new(rid4, "receiver4", proc_receiver));
+
+    let cfs2b_start_tick = interrupts::handlers::TICK.load(Ordering::Relaxed);
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - cfs2b_start_tick < 300 {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    }
+
+    process::scheduler::kill_pid(sid4);
+    process::scheduler::kill_pid(rid4);
+    process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
+    process::scheduler::set_mode(process::scheduler::SchedMode::WeightedPriority); // 이후 데모 원복
+
+    serial_println!("[cfs2b] CFS 모드에서 starvation 워크로드 완료 — 300틱 대기 루프 정상 종료 (FAIRNESS_FLOOR 없이도 kernel_main이 굶지 않음)");
+    serial_println!("--- CFS-2 complete ---\n");
 
     // ── BETA-X-2 1: Event Tracer dump ────────────────────────────────────────
     tracer::dump();

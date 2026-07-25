@@ -50,24 +50,97 @@ fn starvation_threshold(p: Priority) -> Option<u64> {
     }
 }
 
-/// 실제 스케줄링에 사용할 우선순위 계산 (boost + aging 반영).
+/// 기아 방지 하한선 (틱) — 실험 31에서 발견한 starvation 버그 수정.
+///
+/// 기존 aging은 딱 한 단계만 우선순위를 올렸다(Low→Normal, Normal→High).
+/// 그런데 Ready&High 프로세스가 영원히 존재하면(예: yield_now() busy-loop
+/// IPC 프로세스 쌍) Low 프로세스는 aging으로 Normal까지만 오를 수 있어
+/// High를 절대 못 이기고 무기한 스케줄되지 못했다 — 실측: 8-2절(실험 29
+/// 후속) 300틱 대기 루프가 8000+틱이 지나도 종료 안 됨.
+///
+/// 이 값 이상 계속 Ready 대기 중이면 원래 우선순위가 무엇이든 무조건
+/// High로 강제 승격해 스케줄을 보장한다. `starvation_threshold` 값들보다
+/// 충분히 커서(Normal 36틱의 ~5배) 정상적인 ST-1~4 튜닝 범위(TIME_SLICE
+/// 1~4틱, report_interval 8~72틱)에서는 절대 트리거되지 않고, 진짜
+/// 기아 상황에서만 개입하는 안전망 역할만 한다.
+const FAIRNESS_FLOOR_TICKS: u64 = 200;
+
+/// 실제 스케줄링에 사용할 우선순위 계산 (boost + aging + 기아 방지 하한선 반영).
 ///
 /// 적용 순서 (높은 것 우선):
 /// 1. boost_ticks > 0 → High (키보드 입력 긴급 부스트)
-/// 2. aging 조건 충족  → 한 단계 상향 (기아 방지)
-/// 3. 기본 priority
+/// 2. 기아 방지 하한선 초과 → High 강제 승격 (starvation 방지, 실험 31)
+/// 3. aging 조건 충족  → 한 단계 상향 (기존 ALPHA 7)
+/// 4. 기본 priority
 fn effective_priority(p: &super::Process, now: u64) -> Priority {
     if p.boost_ticks > 0 {
         return Priority::High;
     }
+    let wait = now.saturating_sub(p.ready_since_tick);
+    // Idle은 "할 일 없을 때만 도는" 의도된 최하위 루프이므로 기아 방지 대상에서 제외.
+    if p.priority != Priority::Idle && wait >= FAIRNESS_FLOOR_TICKS {
+        return Priority::High;
+    }
     // aging: Ready 대기 시간이 임계값 초과 시 한 단계 상향
     if let Some(threshold) = starvation_threshold(p.priority) {
-        let wait = now.saturating_sub(p.ready_since_tick);
         if wait >= threshold {
             return Priority::from_u8(p.priority as u8 + 1);
         }
     }
     p.priority
+}
+
+// ── CFS-1: vruntime 기반 스케줄러 A/B (실험 33) ────────────────────────────────
+//
+// PE-5(실험 19)에서 "Linux CFS가 처리량 희생 없이 비슷한 반응성을 달성 —
+// MuKernel의 이진 High/Low 분류가 구조적 한계"라는 결론을 냈고, 실험 31/32에서
+// 기존 weighted round-robin + aging이 구조적으로 starvation에 취약함을 실측
+// 확인했다(FAIRNESS_FLOOR_TICKS로 봉합). CFS의 "항상 vruntime이 가장 작은
+// Ready 프로세스를 고른다" 원칙은 실행을 못 받은 프로세스의 vruntime이
+// 그대로 있어 시간이 지날수록 자동으로 가장 매력적인 후보가 되므로, 별도
+// 안전장치 없이 starvation을 구조적으로 없앤다. Linux CFS를 "이긴다"가
+// 목표가 아니라(수십 년 튜닝된 물건과 붙는 건 비현실적) 이 구조적 차이를
+// 정직하게 비교하는 것이 목표 — 기존 WeightedPriority 경로는 그대로 두고
+// 런타임 A/B 토글로 추가한다(PE-4의 policy::set_enabled() 패턴과 동일).
+
+use core::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedMode {
+    WeightedPriority = 0,
+    Cfs = 1,
+}
+
+static SCHED_MODE: AtomicU8 = AtomicU8::new(SchedMode::WeightedPriority as u8);
+
+pub fn set_mode(mode: SchedMode) {
+    SCHED_MODE.store(mode as u8, AtomicOrdering::SeqCst);
+    // CFS 모드 진입마다 새 공정성 epoch 시작 (실험 34 — rebase_vruntime 주석 참고)
+    if mode == SchedMode::Cfs {
+        unsafe { get().rebase_vruntime(); }
+    }
+}
+
+pub fn mode() -> SchedMode {
+    if SCHED_MODE.load(AtomicOrdering::Relaxed) == SchedMode::Cfs as u8 {
+        SchedMode::Cfs
+    } else {
+        SchedMode::WeightedPriority
+    }
+}
+
+/// CFS 모드 전용 가중치 — Linux nice 값 스타일의 지수적 가중치.
+/// `priority_weight`(quanta 개수용, 1/2/4)와는 의미가 다름: 이건 "vruntime이
+/// 얼마나 천천히 느냐" = 평균 CPU 점유율에 직결된다. NICE0_WEIGHT(=1024,
+/// Normal 기준)보다 크면 그만큼 vruntime이 느리게 늘어 더 자주 선택된다.
+const NICE0_WEIGHT: u64 = 1024;
+fn cfs_weight(p: Priority) -> u64 {
+    match p {
+        Priority::High   => 88761, // Linux nice -10 상당 — 훨씬 자주 선택
+        Priority::Normal => 1024,  // nice 0 기준
+        Priority::Low    => 335,   // nice 5 상당
+        Priority::Idle   => 15,    // nice 19 상당 — 남는 시간에만
+    }
 }
 
 pub struct Scheduler {
@@ -83,6 +156,26 @@ impl Scheduler {
         Self { processes: Vec::new(), current: 0, next_pid: 1, remaining_quanta: 1 }
     }
 
+    /// CFS 모드 진입 시 모든 프로세스의 vruntime을 0으로 리베이스한다.
+    ///
+    /// 실험 34(CFS-2)에서 발견: 반복 시행(WP 3회 → CFS 3회)에서 뒤로 갈수록
+    /// CFS 시행의 kbd_lat_avg가 0으로 나오는 문제를 발견했다. 원인은
+    /// kernel_main이 오케스트레이터로서 CFS 모드가 켜져 있는 내내
+    /// `cur`로서 계속 vruntime을 누적하는데, 매 시행마다 새로 spawn되는
+    /// hog/kbd는 그때그때 "현재 Ready 중 최소 vruntime"(대개 0에 가까움)로
+    /// 시작해서 — 시행이 거듭될수록 kernel_main의 누적 vruntime이 새
+    /// 프로세스들보다 계속 커져 kernel_main 자신이 점점 더 심하게 밀려남.
+    /// kernel_main이 못 돌면 벤치마크 오케스트레이션 자체(키입력 트리거
+    /// 기록)가 멈춰버림 — CFS의 "공정함"이 오히려 벤치마크 하네스를
+    /// 굶기는 역설. Linux CFS가 `min_vruntime`을 주기적으로 재기준하는
+    /// 것과 같은 이유로, 여기서는 "CFS 모드 진입 = 새 공정성 epoch 시작"
+    /// 의미로 진입 시점마다 전체 리베이스한다.
+    fn rebase_vruntime(&mut self) {
+        for p in self.processes.iter_mut() {
+            p.vruntime = 0;
+        }
+    }
+
     pub fn alloc_pid(&mut self) -> Pid {
         let pid = self.next_pid;
         self.next_pid += 1;
@@ -93,10 +186,23 @@ impl Scheduler {
         self.processes[self.current].pid
     }
 
-    pub fn spawn(&mut self, process: Process) {
+    pub fn spawn(&mut self, mut process: Process) {
         crate::serial_println!("[sched] spawned '{}' (pid={})", process.name, process.pid);
         // Policy engine에 PID 등록 (interrupt context 밖에서 호출되므로 안전)
         crate::policy::register_pid(process.pid);
+        // CFS-1(실험 33): 새 프로세스를 vruntime=0으로 그냥 넣으면 기존
+        // 프로세스들의 누적 vruntime을 무시하고 당분간 스케줄러를 독점하게
+        // 된다(Linux의 `place_entity`와 동일 문제). 현재 Ready 프로세스들 중
+        // 최소 vruntime으로 맞춰서 시작한다.
+        if mode() == SchedMode::Cfs {
+            let min_vr = self.processes.iter()
+                .filter(|p| p.state == ProcessState::Ready)
+                .map(|p| p.vruntime)
+                .min();
+            if let Some(v) = min_vr {
+                process.vruntime = v;
+            }
+        }
         self.processes.push(process);
     }
 
@@ -116,6 +222,29 @@ impl Scheduler {
         crate::policy::unregister_pid(pid);
     }
 
+    /// Dead 프로세스의 힙 자원 중 안전한 것(message_queue/handle_table)만
+    /// 회수한다 (실험 34/35). `kernel_stack`(64KB)은 의도적으로 건드리지
+    /// 않는다 — `Process::reap()` 문서 주석 참고.
+    ///
+    /// **호출은 인터럽트 컨텍스트 밖(kernel_main의 일반 실행 흐름)에서
+    /// 할 것.** (처음엔 ISR 재진입이 원인이라 추정해 회수 로직을 여기로
+    /// 옮겼었는데, 실제로는 kernel_stack을 free하는 것 자체가 문제였고
+    /// 위치는 무관했다 — 그래도 힙을 건드리는 코드는 일반 컨텍스트에
+    /// 두는 게 여러모로 안전하므로 이 위치는 유지한다.)
+    ///
+    /// 자기 자신(`self.current`)은 제외한다 — 방어적으로 남겨둠(이론상
+    /// 일반 컨텍스트에서 자기 자신이 Dead인 채로 이 함수를 호출할 일은 없음,
+    /// Dead 전환은 `exit_current`를 통해서만 일어나고 즉시 다른 프로세스로
+    /// 전환되므로).
+    pub fn reap_dead(&mut self) {
+        let keep = self.current;
+        for (i, p) in self.processes.iter_mut().enumerate() {
+            if i != keep && p.state == ProcessState::Dead && !p.reaped {
+                p.reap();
+            }
+        }
+    }
+
     /// 현재 프로세스를 Dead로 표시하고 다음 프로세스 RSP 반환.
     ///
     /// 반드시 ISR 컨텍스트(인터럽트 비활성 상태)에서 호출해야 함.
@@ -130,11 +259,33 @@ impl Scheduler {
     }
 
     /// 키보드 인터럽트(ALPHA 6): 현재 포그라운드 프로세스에 boost_ticks 부여.
+    ///
+    /// 실제 IRQ1 핸들러에서만 의미가 있다 — 그 시점의 `self.current`가
+    /// "인터럽트당한 진짜 포그라운드 프로세스"이기 때문. 시뮬레이션 코드처럼
+    /// kernel_main이 직접 호출하면 kernel_main 자신이 `self.current`라서
+    /// 엉뚱하게 자기 자신을 부스트하게 된다 — 특정 프로세스를 부스트하려면
+    /// `boost_pid()`를 쓸 것 (실험 33 CFS-1에서 발견: bench_pe4의 kbd_task
+    /// 시뮬레이션이 이 함수를 직접 호출해 kernel_main을 부스트하고 있었고,
+    /// WeightedPriority에서는 라운드로빈으로 묻혔지만 CFS의 큰 weight
+    /// 격차 때문에 kernel_main이 무기한 스케줄을 독점하는 형태로 드러남).
     pub fn keyboard_boost(&mut self) {
         let cur = self.current;
         // Idle(kernel_main)이면 부스트 의미 없음
         if self.processes[cur].priority == Priority::Idle { return; }
         self.processes[cur].boost_ticks = self.processes[cur].boost_ticks.max(8);
+    }
+
+    /// 특정 PID에 boost_ticks 부여 — "누가 인터럽트당했는지"가 아니라
+    /// "어떤 프로세스를 부스트할지"를 명시적으로 아는 경우(bench_pe4의
+    /// kbd_task 시뮬레이션 등)에 사용.
+    pub fn boost_pid(&mut self, pid: Pid, ticks: u64) {
+        for p in self.processes.iter_mut() {
+            if p.pid == pid {
+                if p.priority == Priority::Idle { return; }
+                p.boost_ticks = p.boost_ticks.max(ticks);
+                return;
+            }
+        }
     }
 
     /// 특정 PID의 우선순위를 설정 (Policy Engine에서 호출).
@@ -149,6 +300,13 @@ impl Scheduler {
             if p.pid == pid { return p.priority; }
         }
         Priority::Normal
+    }
+
+    /// 현재 프로세스에 대해 다음 voluntary yield에서 소비할 sleep 요청을
+    /// 심어둔다 (`sleep_ticks(n)` 전역 함수의 내부 구현).
+    pub fn request_sleep(&mut self, ticks: u64) {
+        let cur = self.current;
+        self.processes[cur].pending_sleep_ticks = ticks.max(1);
     }
 
     /// 특정 PID의 선호 CPU를 설정 (BETA-X 5 core affinity).
@@ -187,10 +345,33 @@ impl Scheduler {
         }
 
         self.processes[cur].preempt_rsp = current_rsp;
-        self.processes[cur].state = ProcessState::Ready;
-        // Ready 진입 시각 기록 (aging 대기 시간 측정)
         let now = crate::interrupts::handlers::TICK.load(core::sync::atomic::Ordering::Relaxed);
-        self.processes[cur].ready_since_tick = now;
+
+        // CFS-1(실험 33): outgoing 프로세스의 vruntime 갱신. rdtsc 기반 —
+        // TICK은 voluntary yield/sleep_ticks에서 안 늘어나므로(실험 30~32),
+        // 실제 소비한 CPU 사이클을 반영하려면 rdtsc가 필요하다.
+        if mode() == SchedMode::Cfs {
+            let now_ts = crate::tracer::rdtsc();
+            let elapsed = now_ts.saturating_sub(self.processes[cur].run_start_ts);
+            let w = cfs_weight(effective_priority(&self.processes[cur], now)).max(1);
+            let delta = elapsed.saturating_mul(NICE0_WEIGHT) / w;
+            self.processes[cur].vruntime = self.processes[cur].vruntime.saturating_add(delta);
+        }
+
+        // sleep_ticks(n): pending_sleep_ticks가 설정돼 있으면 Ready 대신
+        // Blocked로 전환 — switch_to_next의 후보 탐색에서 완전히 제외되므로
+        // (실험 30과 달리) 이 프로세스는 wake_at_tick까지 idle_pct 계산에서
+        // 진짜로 "쉬는" 것으로 잡힌다.
+        let sleep_req = self.processes[cur].pending_sleep_ticks;
+        if sleep_req > 0 {
+            self.processes[cur].pending_sleep_ticks = 0;
+            self.processes[cur].state = ProcessState::Blocked;
+            self.processes[cur].wake_at_tick = now + sleep_req;
+        } else {
+            self.processes[cur].state = ProcessState::Ready;
+            // Ready 진입 시각 기록 (aging 대기 시간 측정)
+            self.processes[cur].ready_since_tick = now;
+        }
 
         // voluntary yield는 quanta 잔량 무시하고 즉시 전환
         let new_rsp = self.switch_to_next(current_rsp, is_voluntary);
@@ -212,22 +393,42 @@ impl Scheduler {
     /// 3. 후보 중 가장 높은 우선순위의 Ready 프로세스를 선택.
     ///    동순위면 현재 위치 다음부터 라운드로빈.
     fn switch_to_next(&mut self, current_rsp: u64, force_switch: bool) -> u64 {
+        let now = crate::interrupts::handlers::TICK.load(core::sync::atomic::Ordering::Relaxed);
+
+        // sleep_ticks(n) 깨우기: wake_at_tick이 만료된 Blocked 프로세스를
+        // Ready로 되돌린다. 매 스위치마다 전체 스캔하므로(별도 타이머 큐
+        // 없음) 최악의 경우 만료 후 최대 1 TIME_SLICE만큼 깨어남이 지연될
+        // 수 있음 — 이 커널의 틱 단위 정밀도(수십 ms급)에서는 무시 가능.
+        for p in self.processes.iter_mut() {
+            if p.state == ProcessState::Blocked && p.wake_at_tick != 0 && now >= p.wake_at_tick {
+                p.state = ProcessState::Ready;
+                p.wake_at_tick = 0;
+                p.ready_since_tick = now;
+            }
+        }
+
         let count = self.processes.len();
         if count <= 1 {
             self.processes[self.current].state = ProcessState::Running;
             return current_rsp;
         }
 
-        // voluntary yield가 아닌 타이머 선점이고 quanta가 남아있으면 계속 실행
-        if !force_switch && self.remaining_quanta > 1 {
+        let cfs = mode() == SchedMode::Cfs;
+
+        // voluntary yield가 아닌 타이머 선점이고 quanta가 남아있으면 계속 실행.
+        // CFS 모드는 quanta 개념이 없음 — 매 스위치마다 vruntime을 새로 비교.
+        if !cfs && !force_switch && self.remaining_quanta > 1 {
             self.remaining_quanta -= 1;
             self.processes[self.current].state = ProcessState::Running;
             return current_rsp;
         }
 
+        if cfs {
+            return self.switch_to_next_cfs(current_rsp);
+        }
+
         // 다음 후보 탐색: Ready 중 최고 effective_priority 찾기 (aging 반영)
         // BETA-X 5: 동순위 시 현재 코어 affinity 선호 프로세스 우선
-        let now    = crate::interrupts::handlers::TICK.load(core::sync::atomic::Ordering::Relaxed);
         let my_cpu = crate::smp::current_cpu_id();
         let start  = self.current;
         let mut best_idx:      Option<usize> = None;
@@ -271,6 +472,66 @@ impl Scheduler {
         self.remaining_quanta = priority_weight(epri).max(1);
 
         self.processes[next].state = ProcessState::Running;
+        // CFS 모드로 전환될 경우를 대비해 run_start_ts는 항상 갱신해둔다
+        // (그렇지 않으면 WeightedPriority로 오래 실행된 프로세스가 CFS로
+        // 전환된 첫 회계에서 부팅 이후 전체 rdtsc 경과를 통째로 vruntime에
+        // 더해버리는 landmine이 생김).
+        self.processes[next].run_start_ts = crate::tracer::rdtsc();
+        self.current = next;
+        self.processes[next].preempt_rsp
+    }
+
+    /// CFS-1(실험 33): vruntime이 가장 작은 Ready 프로세스를 선택.
+    ///
+    /// `boost_ticks > 0`(키보드 인터랙티브 부스트)인 프로세스가 있으면
+    /// vruntime과 무관하게 그걸 즉시 우선 선택 — WeightedPriority 경로의
+    /// boost 의미(README "게임 실행됨" 반응성 비전, PE-4 실험)를 그대로 유지.
+    /// 동률 vruntime은 기존과 동일하게 `preferred_cpu` 힌트로, 그다음은
+    /// 라운드로빈 스캔에서 먼저 발견된 것으로 타이브레이크.
+    fn switch_to_next_cfs(&mut self, current_rsp: u64) -> u64 {
+        let count = self.processes.len();
+        let my_cpu = crate::smp::current_cpu_id();
+        let start = self.current;
+
+        let mut boost_idx: Option<usize> = None;
+        let mut best_idx: Option<usize> = None;
+        let mut best_vruntime = u64::MAX;
+        let mut best_same_cpu = false;
+
+        for i in 1..=count {
+            let idx = (start + i) % count;
+            let p = &self.processes[idx];
+            if p.state != ProcessState::Ready { continue; }
+
+            if p.boost_ticks > 0 && boost_idx.is_none() {
+                boost_idx = Some(idx);
+            }
+
+            let same_cpu = p.preferred_cpu == u8::MAX || p.preferred_cpu == my_cpu;
+            let better = match best_idx {
+                None => true,
+                Some(_) => {
+                    p.vruntime < best_vruntime
+                    || (p.vruntime == best_vruntime && same_cpu && !best_same_cpu)
+                }
+            };
+            if better {
+                best_vruntime = p.vruntime;
+                best_idx      = Some(idx);
+                best_same_cpu = same_cpu;
+            }
+        }
+
+        let next = match boost_idx.or(best_idx) {
+            Some(idx) => idx,
+            None => {
+                self.processes[self.current].state = ProcessState::Running;
+                return current_rsp;
+            }
+        };
+
+        self.processes[next].state = ProcessState::Running;
+        self.processes[next].run_start_ts = crate::tracer::rdtsc();
         self.current = next;
         self.processes[next].preempt_rsp
     }
@@ -346,6 +607,14 @@ pub fn keyboard_boost() {
     unsafe { get().keyboard_boost(); }
 }
 
+/// 특정 PID를 명시적으로 부스트 (실험 33에서 발견한 keyboard_boost() 자기
+/// 부스트 버그의 수정 — bench_pe4처럼 "누구를 부스트할지 이미 아는" 시뮬레이션
+/// 코드용). PE off 상태에서는 동일하게 생략.
+pub fn boost_pid(pid: Pid, ticks: u64) {
+    if !crate::policy::is_enabled() { return; }
+    unsafe { get().boost_pid(pid, ticks); }
+}
+
 /// 우선순위 설정 (Policy Engine에서 호출, ALPHA 5)
 pub fn set_priority(pid: Pid, pri: Priority) {
     unsafe { get().set_priority(pid, pri); }
@@ -372,6 +641,25 @@ pub fn yield_now() {
     }
 }
 
+/// 진짜 블로킹 sleep (실험 30 후속).
+///
+/// `yield_now()`와 달리 이 프로세스를 `switch_to_next`의 후보 탐색에서
+/// 완전히 제외한다(`ProcessState::Blocked`) — 최소 `ticks`틱 동안 스케줄러가
+/// 이 프로세스를 실행 후보로 보지 않으므로, Policy Engine의 idle_pct 계산에
+/// 실제 idle로 잡힌다. voluntary_yield 기반의 협조적 전환(yield_now)은
+/// 스케줄 여부만 바꿀 뿐 "안 도는" 상태를 표현하지 못했던 것과 대비된다.
+///
+/// 구현은 기존 `int 0x40`(yield_now) 경로를 그대로 탄다 — 현재 프로세스에
+/// sleep 요청을 먼저 심어두고("pending_sleep_ticks") voluntary yield를
+/// 트리거하면, `do_preempt`가 이를 보고 Ready 대신 Blocked+wake_at_tick으로
+/// 전환한다. 별도 인터럽트 벡터나 어셈블리 변경이 필요 없다.
+#[inline(always)]
+pub fn sleep_ticks(ticks: u64) {
+    if ticks == 0 { return; }
+    unsafe { get().request_sleep(ticks); }
+    yield_now();
+}
+
 /// 현재 프로세스를 종료하고 다음 프로세스로 전환.
 ///
 /// 반드시 ISR 핸들러(`voluntary_yield`)를 통해 간접 호출해야 함.
@@ -390,6 +678,15 @@ pub fn get_stats(pid: Pid) -> Option<(u64, u64)> {
 /// 특정 PID를 Dead로 표시
 pub fn kill_pid(pid: Pid) {
     unsafe { get().kill(pid); }
+}
+
+/// Dead 프로세스의 힙 자원을 실제로 회수 (실험 35).
+///
+/// **인터럽트 컨텍스트 밖(kernel_main의 일반 실행 흐름)에서만 호출할 것** —
+/// `Scheduler::reap_dead()` 문서 주석 참고. 보통 `kill_pid()` 호출 직후
+/// (또는 짧게 반복되는 spawn/kill 루프의 매 반복 끝)에 호출하면 된다.
+pub fn reap_dead() {
+    unsafe { get().reap_dead(); }
 }
 
 pub fn current_pid() -> Pid {

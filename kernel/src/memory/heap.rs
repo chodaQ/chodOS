@@ -33,11 +33,15 @@ use super::frame;
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-/// 힙에 할당할 연속 프레임 수 (4MB = 1024 × 4KB)
+/// 힙에 할당할 연속 프레임 수 (32MB = 8192 × 4KB)
 ///
-/// 초기 힙 크기로 충분한 양.
-/// 추후 동적 힙 확장 기능을 추가할 수 있음 (힙이 가득 차면 프레임 추가).
-const HEAP_FRAMES: usize = 1024; // 4MB
+/// 실험 35(kernel_stack 재사용 안전성 문제) 이후 4MB→32MB로 확대 —
+/// kernel_stack(프로세스당 64KB)을 회수하지 않기로 했으므로 반복적인
+/// spawn/kill이 많은 워크로드(PE-4/CFS 벤치마크 반복 시행 등)에서 힙이
+/// 더 오래 버티도록 여유를 크게 늘렸다. 사용 가능한 물리 메모리가 총
+/// 230MB 정도라 32MB는 무리 없는 수준(근본 수정은 아니고 유예 — 자세한
+/// 내용은 `Process::reap()` 문서 주석과 EXPERIMENTS.md 실험 35 참고).
+const HEAP_FRAMES: usize = 8192; // 32MB
 
 /// 커널 힙 초기화
 ///

@@ -24,8 +24,165 @@
 > 놀리지 않아 이 커널의 idle_pct(스케줄 여부 기반) 지표에서는 항상 바쁜
 > 것처럼 보임. 근본 원인이 워크로드 설계가 아니라 "커널에 진짜 블로킹
 > sleep primitive가 없다"는 더 깊은 제약임을 발견 — sleep_ticks(n) 같은
-> 스케줄러 primitive 추가가 다음 후보로 격상됨**. PE-3 lag-1 정량화,
-> ST-5 장기 A/B 재측정도 여전히 대기 중
+> 스케줄러 primitive 추가가 다음 후보로 격상됨** → **실험 31에서
+> `sleep_ticks(n)`을 실제로 구현·검증 완료.** `Process`에
+> `pending_sleep_ticks`/`wake_at_tick` 필드를 추가하고, `do_preempt`가 sleep
+> 요청 시 프로세스를 `Ready` 대신 `Blocked`로 전환(`switch_to_next`의 후보
+> 탐색에서 완전히 제외)하도록 분기했다. 공개 API는 별도 인터럽트 벡터 없이
+> 기존 `yield_now()`(`int 0x40`) 경로를 재사용해 구현. `sleep_ticks(4)` 기반
+> sender3/receiver3로 PE-2 게임 프로파일 경계값을 재도전한 결과 idle_pct가
+> 79%→98%까지 실제로 상승했고(실험 30의 yield_now 기반 0%대와 정반대),
+> adjusted idle 70(HLT)↔74(MWAIT) 사이에서 `recommend_idle`의 "idle_pct>70"
+> 임계값과 정확히 일치하는 크로스오버를 확인해 게임 쪽 경계값 실측을
+> 마무리했다(실험 29 빌드측 경계값과 대칭 완료). **부수적으로, 자동화
+> 검증 중 기존 PE-2 후속(실험 29, yield_now 기반) 300틱 대기 루프가
+> 8000+틱이 지나도 끝나지 않는 스케줄러 starvation 버그를 발견** — aging이
+> 한 단계만 우선순위를 올리는 구조라, Ready&High 프로세스가 영원히
+> 존재하면(busy yield 루프 등) Low/Normal 프로세스가 무기한 스케줄되지
+> 못한다. 지금까지는 사람이 QEMU를 직접 보다가 Ctrl+C로 꺼왔기 때문에
+> 드러나지 않았던 것으로 추정. → **실험 32에서 수정 완료.** `effective_priority`에
+> `FAIRNESS_FLOOR_TICKS=200`(기존 aging 최대 임계값의 ~5.5배, ST-1~4 정상
+> 튜닝 범위보다 충분히 큼) 하한선을 추가해, 이 이상 계속 Ready 대기 중이면
+> 원래 우선순위 무관 무조건 High로 강제 승격하도록 했다(Idle은 의도적으로
+> 제외). 수정 전 8000+틱 동안 미종료였던 구간이 수정 후 tick≈396에 정상
+> 종료됐고, 이후 300초간 후속 데모가 panic/fault 없이 진행되는 것도 확인 —
+> ST-1~4가 쌓아온 안정성에는 영향 없음.
+> **→ 실험 33(CFS-1)에서 vruntime 기반 CFS 모드를 실제로 구현·검증
+> 완료.** `SchedMode`(WeightedPriority/Cfs) 런타임 A/B 토글을 추가하고,
+> `Process`에 `vruntime`/`run_start_ts` 필드를 더해 rdtsc 기반으로 실제
+> 소비 CPU 사이클을 vruntime에 반영했다(TICK 기반은 voluntary yield에서
+> 안 늘어나 부적합 — 실험 30~32에서 확인된 제약 재사용). Linux nice 스타일
+> `cfs_weight` 테이블(High=88761/Normal=1024/Low=335/Idle=15)로 Policy
+> Engine의 기존 우선순위 분류를 그대로 CFS의 weight 입력으로 재사용해,
+> 스케줄러만 바뀌고 ML4/ST-1~4의 관측 신호는 여전히 유효하도록 설계했다.
+> 기존 WeightedPriority 경로(starvation 버그 수정 포함)는 완전히 그대로
+> 두고 모드로만 분기 — 전면 교체가 아닌 A/B 비교. PE-4의 cpu_hog+kbd_task
+> 하네스를 그대로 재사용해 비교한 결과, 키입력 레이턴시가 WP 대비 약
+> 2배 개선(55.3M→27.9M cycles)되고 hog 완료 시간도 6틱→1틱으로 빨라져 —
+> PE-4에서 관측됐던 "반응성 개선이 처리량 희생을 동반한다"는 트레이드오프가
+> CFS에서는 나타나지 않았다(예비 단일 시행, 반복 검증은 CFS-2로 이월).
+> **부수적으로, 구현 직후 CFS 벤치마크가 무기한 멈추는 현상에서 진짜 버그를
+> 하나 더 발견** — `bench_pe4`의 키입력 시뮬레이션이 `keyboard_boost()`를
+> 직접 호출하면서(그 함수가 "호출 시점의 `self.current`"를 부스트하는 탓에)
+> kernel_main 자기 자신을 잘못 부스트하고 있었다. WeightedPriority의
+> 라운드로빈에는 묻혔지만 CFS의 86배 weight 격차 때문에 kernel_main이
+> 스케줄을 무기한 독점하는 형태로 처음 명확히 드러남 — `boost_pid(pid,
+> ticks)`를 신설해 수정했다(실제 IRQ1 핸들러용 `keyboard_boost()` 자체는
+> 그대로 유지). 과거 PE-4 결과가 이 버그의 영향을 일부 받았을 가능성은
+> 있으나 재해석은 범위 밖으로 남겼다.
+> **→ 실험 34(CFS-2)에서 반복 시행(n=3)과 starvation 정면 재현까지
+> 완료.** CFS 레이턴시 min/avg/max=20.5M/23.8M/25.7Mcycle vs WP
+> 53.9M/54.9M/55.4Mcycle로 CFS-1의 "약 2배 개선" 결과가 재현됨을 확인했고,
+> hog 완료 시간은 CFS가 3회 모두 정확히 1틱(분산 0)으로 WP(4~7틱)보다도
+> 일관됐다. 실험 31/32와 완전히 동일한 starvation 워크로드(yield_now
+> busy-loop sender/receiver, 영원히 Ready&High)를 CFS 모드로 300틱 대기
+> 루프에 그대로 태워 **정상 종료를 직접 확인**(`FAIRNESS_FLOOR_TICKS` 같은
+> WeightedPriority 전용 안전장치 없이도 kernel_main이 굶지 않음 — WP였다면
+> 8000+틱 동안 미종료). **구현 과정에서 두 번째 CFS 관련 버그를 발견·수정**
+> — CFS 모드로 벤치마크를 반복 호출하면 뒤로 갈수록 kernel_main(오케스트
+> 레이터, CFS 모드 내내 vruntime 누적)이 매번 vruntime=0으로 새로 spawn
+> 되는 hog/kbd에 밀려 점점 못 돌게 되어 벤치마크 자체가 멈추는 역설
+> ("CFS의 공정함이 벤치마크 하네스를 굶김")을 겪었다. Linux CFS가
+> `min_vruntime`을 주기적으로 재기준하는 것과 같은 이유로,
+> `Scheduler::rebase_vruntime()`을 추가해 `scheduler::set_mode(Cfs)`
+> 호출마다(="새 공정성 epoch 시작") 전체 vruntime을 0으로 리베이스하도록
+> 수정했다. **별개로, 이번 실험이 과거 어떤 실행보다 많은 spawn/kill
+> 사이클을 거치면서 부팅 후반부(BETA 21 musl 데모)에서 처음으로 OOM 패닉이
+> 발생** — `Scheduler::kill()`이 프로세스를 Dead로 표시만 하고
+> `kernel_stack: Vec<u8>` 등을 회수하지 않는 기존 자원 누수가 원인으로
+> 추정된다(CFS-2 자체 결과는 이 패닉보다 훨씬 앞서 완료돼 영향 없음,
+> 수정은 범위 밖으로 별도 todo 등록).
+> **→ 실험 35에서 Dead 프로세스 자원 누수를 수정.** `Process::reap()`이
+> `kernel_stack`/`message_queue`/`handle_table`을 새 빈 값으로 교체해
+> drop시킨다. 핵심 제약: 이 커널은 ring0 인터럽트에서 스택을 바꾸지
+> 않으므로 `kill()`/`exit_current()`는 항상 "죽는 프로세스 자신의
+> kernel_stack 위에서" 실행 중이다 — 그 자리에서 자기 자신을 reap하면
+> 실행 중인 스택을 해제하는 use-after-free가 된다. 그래서 즉시 회수 대신
+> `switch_to_next()` 진입 시 `self.current`를 제외한 모든 Dead 프로세스를
+> 회수하는 지연 회수 방식으로 구현 — 자기 자신은 다음번에 "다른"
+> 프로세스 컨텍스트에서 이 함수가 다시 호출될 때 자연스럽게 회수된다.
+> **부수적으로, 이번이 실험 31~34(sleep_ticks/starvation 하한선/CFS-1/
+> CFS-2)를 합친 상태로 처음 전체 부팅을 끝까지 돌려본 것이었는데, 이
+> 세션에서 손대지 않은 ST-3(실험 25) `task_c` 구간에서 `#GP` 예외로
+> 부팅이 죽는 회귀를 발견했다.** → **실험 36에서 위치를 확정.** `git
+> worktree`로 마지막 커밋(HEAD)을 격리 빌드해 5분(tick 5420+) 동안
+> `-smp 4`/`-smp 1` 모두 무사고 완주함을 먼저 확인해 "잠재 타이밍 버그가
+> 아니라 실험 31~34 어딘가의 진짜 신규 회귀"임을 못박았다. PIE로 링크된
+> 커널이 매 부팅 임의 주소에 재배치되는 점을 이용해, 정적 GDT 심볼의
+> 런타임 주소와 링크타임 주소의 차를 재배치 델타로 써서 두 번의 독립된
+> 폴트를 역산한 결과 **둘 다 정확히 `isr32`(타이머 선점 ISR, 이번에
+> 손대지 않은 코드)의 `iretq` 명령어로 일치**했다. 트리거 조건도 특정—
+> 매번 `task_c → task_d`(한 번도 스케줄된 적 없는 새 프로세스로의 첫
+> 전환) 시점, `TIME_SLICE`가 3→1틱으로 좁혀진 직후. `next` 프로세스의
+> 저장된 레지스터 프레임을 `iretq` 직전 직접 덤프해 CS/RFLAGS/RIP 등이
+> 전부 정상임을 확인했음에도 여전히 fault — 즉 프레임 자체가 아니라
+> `iretq` 실행 방식 쪽이 원인. reap(실험 35 본 수정)·
+> `FAIRNESS_FLOOR_TICKS`(실험 32)·CFS(이 시점엔 비활성)·SMP(`-smp 1`)·
+> `policy::on_switch` 재진입 — 5개 후보 모두 개별 비활성화해도 동일하게
+> 재현되어 전부 배제했다. **부수적으로 `on_switch`가 `&mut Scheduler`를
+> 쥔 채로 `scheduler::set_priority()` 등을 재진입 호출해 전역 `Scheduler`에
+> 대한 두 번째 `&mut` 별칭을 만드는 것을 발견** — HEAD에도 있던 기존
+> 패턴이라 이번 회귀 원인은 아니지만(비활성화해도 동일 재현) 그 자체로
+> 실재하는 aliasing UB라 별도 기록. 근본 원인은 이번 세션의 정적
+> 분석/재빌드 비교로는 확정하지 못함 — 다음 단계는 `qemu -s -S` + gdb로
+> `iretq` 직전 레지스터/스택을 라이브 관찰하는 것(이번에 확정한 정확한
+> 링크주소 `0xffffffff8001ffad` 재사용 가능).
+> **→ 실험 37에서 "결정적 버그"라는 결론을 정정.** `kernel_stack`을
+> 인터럽트 밖(`Scheduler::reap_dead()`)에서 회수하도록 위치만 옮겨봐도
+> 여전히 재현되는 것부터 재확인한 뒤, `kernel_stack` 자체를 회수하지
+> 않도록 바꾸자 55분짜리 전체 부팅 1회 + 짧은 반복 8회 전부 무크래시였다.
+> 그런데 "진짜 고친 것인지" 검증하려고 **같은 바이너리(kernel_stack 회수
+> 재활성화 상태)를 여러 번 그냥 재부팅만 반복**해봤더니 크래시가 매번
+> 나지 않았다 — 어떤 부팅은 무사고, 어떤 부팅은 실험 36과 동일 지점에서
+> 재현. **즉 이 버그는 비결정적(레이스) 버그다.** 실험 36의 "두 번의
+> 독립된 폴트가 링크타임 주소로 완전히 일치했다"는 관측은 폴트가 "일어날
+> 때의 위치"가 결정적이라는 뜻이었지 "매번 반드시 일어난다"는 뜻이
+> 아니었던 것 — 유력한 원인은 QEMU 가상 타이머가 호스트 wall-clock에
+> 묶여 있어 인터럽트 타이밍이 부팅마다 미세하게 달라지는 것으로 추정.
+> `kernel_stack` 미회수+힙 32MB 조합이 이번 세션에서 시도한 모든 조합
+> 중 유일하게 크래시율 0%(8/8 + 55분 1/1)였지만, 근본 원인을 없앤 게
+> 아니라 메모리 레이아웃/타이밍을 흔들어 레이스 발동 확률을 낮췄을
+> 가능성이 높다 — **완화책으로 채택하되 확정적 수정은 아님을 명시.**
+> 라이브 디버깅도 시도했다 — `gdb`가 환경에 없어 `lldb`의 `gdb-remote`로
+> `qemu -s -S`에 연결까지는 성공했지만, PIE 재배치+비결정성 때문에
+> "정확히 언제 멈춰서 델타를 계산하고 브레이크포인트를 걸지"를 이 세션의
+> 배치 명령 위주 도구로는 안정적으로 해내지 못해 중단.
+> **→ 실험 38에서 `qemu -icount shift=auto,sleep=off`로 재도전, 100%
+> 결정적 재현 확보(5/5 재부팅 전부 동일 지점 크래시).** 이번엔 `isr32`가
+> 아니라 **`isr64`(`yield_now()` 경로)의 `iretq`**에서 재현됨을 확인 —
+> 서로 다른 트리거(`task_c→task_d` 전환 vs `sender2→receiver2` 전환)가
+> 같은 근본 매커니즘을 공유한다는 뜻. 크래시 후 커널의 예외 핸들러가
+> `cli;hlt` 무한루프로 멈춰 레지스터가 보존되는 점을 이용해 `lldb
+> gdb-remote`로 라이브 조사: `error_code`를 디코딩하면 CS 슬롯에 유효
+> GDT 범위를 완전히 벗어난 값(셀렉터 인덱스 1435)이 들어있었다 — 미묘한
+> 오차가 아니라 완전한 스택 오염. `switch_to_next()`가 `next` 프로세스를
+> 고르는 바로 그 순간에 반환할 프레임(RIP/CS/RFLAGS)을 직접 찍어보니
+> **디스패치 시점엔 완전히 정상**이었다(`sender2`/`receiver2` 둘 다).
+> → **스케줄러의 후보 선택 로직/반환값 자체는 이제 배제됨** — 남은 범위는
+> "Rust가 올바른 rsp를 반환한 시점"과 "어셈블리 `iretq`가 그 메모리를
+> 실제로 읽는 시점" 사이의 좁은 창으로 좁혀졌다. `INT_GATE`라 이 창에서
+> 다른 인터럽트가 끼어들 수 없어야 하는데, 실측(정상 프레임→크래시)은
+> 뭔가 끼어든 것처럼 보인다 — IF=0 가정이 깨지는 경로가 있거나 TCG
+> 자체의 엣지 케이스일 가능성도 배제 못함. 완화책(kernel_stack 미회수+
+> 힙 32MB)은 이 결정적 `-icount` 모드에서도 크래시 0건으로 재확인(GUI
+> 데모 섹션까지 진행) — 근본 원인은 여전히 미확정이지만 완화책의 신뢰도는
+> 한 번 더 올라갔다.
+> **→ 실험 39에서 커널 자체적으로 DR0/DR7 하드웨어 watchpoint를 걸어
+> 재도전했으나(`preempt_rsp`의 CS 슬롯 쓰기 감시) 즉시 행(hang)됐다.**
+> 원인 추정: 이 커널은 예외 벡터 0-31에 전용 IST 스택이 없어 `#DB` 진입
+> 자체가 현재 스택(watchpoint 감시 영역과 가까운/같은 곳)에 프레임을
+> 푸시하면서 watchpoint를 재귀적으로 재트리거 — 원인 격리 전에 되돌림.
+> **다음 방향: `#DB`(vector 1) 전용 IST 스택을 먼저 마련한 뒤 하드웨어
+> watchpoint 재시도, 또는 `isr32`/`isr64` 스텁의 `mov rsp,rax` 직후~
+> `iretq` 직전 사이를 임시 계측해 메모리 스냅샷을 다시 비교, 또는 진짜
+> 대화형 GDB/lldb 세션 — 그래야 이 레이스의 진짜 정체를 확정할 수 있다.
+> 그 다음 `on_switch` aliasing 정리, PE-3 lag-1 정량화
+> 순. 어느 쪽이든 PE-5가 이미 보여줬듯 수십 년 튜닝된 Linux CFS를
+> "이긴다"가 목표가 아니라 구조적 차이를 정직하게 기록하는 것이
+> 목표(사용자 확인, 2026-07-19). 이 프로젝트의 차별점은 스케줄러 자체가
+> 아니라 IPC fast path + 메모리/전력 Policy Engine + Self-Tuning의
+> 조합이라는 인식을 유지한다.** ST-5 장기 A/B 재측정도
+> 여전히 대기 중
 >
 > **BETA-X 핵심 발견:** 마이크로커널 오버헤드의 진짜 정체는 "메시지 복사
 > 비용"이 아니라 "전환(컨텍스트 스위치) 비용"이었다. yield_now()를 생략한
@@ -256,6 +413,9 @@ Tier 3 ⬜: io_uring, BPF, namespaces, cgroups, seccomp
 | ML 1~4 | Bayesian·GBDT·RL·AND Ensemble (87%) | ✅ |
 | Phase D (BETA 19~21) | ELF .so·동적 링커·musl-libc | ✅ |
 | PE-1~5 | 메모리·전력·코어·A/B 비교·Linux CFS 비교 | ✅ |
+| Self-Tuning ST-1~4 + PE-2/3 확장 (실험 21~30) | 평가주기/α/TIME_SLICE 동적화·WorkloadProfile 자동감지·PE-2 stale-metric 버그 수정 | ✅ |
+| 스케줄러 안정성 (실험 31~35) | sleep_ticks(n) 블로킹 primitive·starvation 하한선(FAIRNESS_FLOOR_TICKS)·CFS-1/CFS-2 A/B·Dead 프로세스 자원 회수 | ✅ |
+| #GP 부팅 회귀 조사 (실험 36~39) | 위치 확정(isr32/isr64 iretq)·비결정적 레이스로 재확인·kernel_stack 미회수 완화책 채택 | 🔶 완화책 적용, 근본원인 미해결 |
 
 ---
 
@@ -659,4 +819,96 @@ PE-5:     "Policy Engine이 CFS보다 나을 것" → CFS가 더 효율적
 - [ELF Specification](https://refspecs.linuxfoundation.org/elf/elf.pdf) — Phase D 참조
 - [musl-libc](https://musl.libc.org/) — Phase D 동적 링커 호환 대상
 - [Intel SDM Vol.2 — CPUID](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) — PE-3 코어 특성 감지 참조
-- [Linux CFS Scheduler](https://www.kernel.org/doc/html/latest/scheduler/sched-design-CFS.html) — PE-5 비교 기준1
+- [Linux CFS Scheduler](https://www.kernel.org/doc/html/latest/scheduler/sched-design-CFS.html) — PE-5 비교 기준
+
+---
+
+## 8. 다음 로드맵 (2026-07-24 기준)
+
+> KSEF/대회 제출(1차 마감 8/27) 전까지 남은 작업을 실험 30~39에서 흩어져
+> 있던 "다음 방향" 메모와 `roadmap.json`의 `todo` 항목을 합쳐 우선순위
+> 순으로 정리한다. 순서 기준은 "이 프로젝트를 논문/발표로 정리할 때
+> 설명 못 하고 넘어가면 치명적인 것"부터.
+
+### 8.1 최우선 — #GP 부팅 회귀 근본 원인 규명 (실험 36~39 후속)
+
+```
+현재까지 좁혀진 범위: "Rust switch_to_next()가 올바른 rsp를 반환한 시점"과
+"어셈블리 iretq가 그 메모리를 실제로 읽는 시점" 사이의 좁은 창.
+INT_GATE라 IF=0이어야 하는데 실측(정상 프레임 → 크래시)은 뭔가 끼어든 것처럼 보임.
+
+이걸 최우선으로 두는 이유: 발표/질의응답에서 "왜 아직도 이 버그가 있냐"는
+질문에 "위치는 확정했지만 근본 원인은 모른다"고 정직하게 답할 수는 있지만,
+완화책(kernel_stack 미회수)만으로 제출하면 "회피"로 보일 위험이 있다.
+적어도 "다음 시도가 무엇이었고 왜 실패했는지"까지는 이번 세션 수준으로
+계속 기록해야 함.
+
+순서:
+  1. #DB(vector 1) 전용 IST 스택 마련 (idt.rs) — 실험 39가 실패한 이유가
+     "IST 없이 워치포인트를 걸어서 #DB 진입 자체가 재귀 트리거"였으므로,
+     이 전제조건 없이는 하드웨어 watchpoint 재시도가 무의미함.
+  2. IST 마련 후 DR0/DR7 watchpoint로 CS 슬롯 쓰기 감시 재시도.
+  3. 병행/대체 경로: isr32/isr64 스텁의 `mov rsp,rax` 직후~`iretq` 직전
+     사이에 임시 메모리 스냅샷 계측(레지스터가 아닌 스택 raw 바이트 비교) —
+     watchpoint가 또 막히면 이쪽으로.
+  4. 그래도 안 잡히면 진짜 대화형 GDB/lldb 세션 확보(이번 세션은 배치형
+     호출이라 브레이크포인트 타이밍을 못 맞췄음 — PIE 재배치 델타를 매번
+     다시 계산해야 하는 문제도 있었음, 가능하면 이 스크립트화부터).
+
+완화책(kernel_stack 미회수 + 힙 32MB)은 그대로 유지 — 근본 수정 전까지
+데모/벤치마크 안정성을 이게 담보하고 있음. 되돌리지 말 것.
+```
+
+### 8.2 우선순위 2 — on_switch aliasing UB 정리 (실험 36 부수 발견)
+
+```
+Scheduler::do_preempt()가 &mut self를 쥔 채로 policy::on_switch()를 호출하고,
+그 안에서 scheduler::set_priority() 등이 unsafe fn get()으로 같은 전역
+Scheduler에 대한 두 번째 &mut을 만듦 — Rust aliasing 모델 위반.
+이번 #GP 회귀의 원인은 아님(비활성화해도 동일 재현으로 확인 완료)이지만,
+noalias 최적화가 켜지는 빌드 설정(release 등)에서 새로운 미확정 버그의
+씨앗이 될 수 있음. #GP 규명(8.1)이 안정화된 뒤, 또는 병행 가능하면
+먼저 처리해도 됨 — 8.1과 코드 영역이 겹치므로(둘 다 do_preempt/switch_to_next
+근처) 순서 조율 필요.
+
+정리 방향: on_switch에 필요한 값(우선순위, 코어 힌트)을 스케줄러 밖으로
+미리 스냅샷해서 넘기거나, on_switch 내부 호출들을 &mut 재획득 없이 직접
+필드 접근으로 바꾸는 두 가지 후보 중 선택.
+```
+
+### 8.3 우선순위 3 — PE-3 lag-1 정량화 + ST-5 장기 A/B 재설계
+
+```
+PE-3 lag-1: WorkloadProfile 전환 직후 1개 창 동안 코어권고가 이전
+프로파일 기준으로 나오는 설계상 지연이 실제로 얼마나 자주/얼마나 오래
+영향을 주는지 아직 측정 안 함. QEMU가 Hybrid CPUID(0x1A)를 지원하지
+않아 구조 검증 위주로만 확인된 상태 — 실측은 애초에 제약이 있음을
+발표 자료에 명시할 것.
+
+ST-5: 실험 26에서 "PE-4 워크로드(~37틱)가 너무 짧아 Self-Tuning이
+개입할 리포트 창이 사실상 1개뿐"이라는 실험 설계 문제로 판명되고
+보류됨. HOG_TARGET_ITERS를 몇 배 늘린 장기 워크로드로 재설계해서
+Self-Tuning 적용 전후 A/B를 다시 재는 게 남아있음 — "Self-Tuning이
+실제로 처리량/반응성 트레이드오프를 개선하는가"라는 이 트랙 전체의
+핵심 질문에 아직 답을 못한 상태이므로, 시간이 되면 8.1/8.2보다 먼저
+당겨도 됨(발표 임팩트가 큼).
+```
+
+### 8.4 보류 (대회 제출 이후로 명시적으로 미룸)
+
+```
+Phase E (smoltcp/DNS/TLS), Phase F (zstd/pacman-static/glibc) — "언제든
+할 수 있는 것"이라 Self-Tuning/안정성 트랙보다 후순위라는 기존 결정
+유지. 대회 1차 제출(8/27) 전까지 손대지 않는다.
+```
+
+### 8.5 발표 준비와의 연결
+
+```
+8.1~8.3은 전부 "코드를 더 얹는" 작업이지만, MEMORY.md에 기록된 대로
+이 프로젝트의 진짜 급한 과제는 "본인이 이미 있는 코드를 설명할 수
+있는가"다. 새 실험을 벌이기 전에 IPC fast path / ML Policy Engine
+부분부터 코드 리뷰를 마치는 것이 로드맵상으로도 우선순위가 더 높을
+수 있음 — 이 섹션은 "코드로 할 일" 목록이지 "지금 당장 할 일" 순서는
+아니라는 점을 사용자와 다음 세션 시작 시 다시 확인할 것.
+```1
