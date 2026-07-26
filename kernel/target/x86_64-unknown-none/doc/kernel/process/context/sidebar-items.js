@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["switch_context"],"struct":["CpuContext"]};

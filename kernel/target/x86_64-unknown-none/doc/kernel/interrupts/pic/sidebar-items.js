@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["ICW1_INIT","ICW4_8086","PIC1_CMD","PIC1_DATA","PIC1_OFFSET","PIC2_CMD","PIC2_DATA","PIC2_OFFSET","PIC_EOI"],"fn":["eoi_master","eoi_slave","inb","init","io_wait","outb"]};

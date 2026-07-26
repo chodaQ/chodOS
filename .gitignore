@@ -1,6 +1,9 @@
-# Rust 빌드 결과물
-/target/
+# Rust 빌드 결과물 (leading slash 없이 — kernel/target 등 하위 디렉토리도 포함)
+target/
 **/*.rs.bk
+
+# make로 재생성되는 빌드 산출물 (ISO, ext4 이미지, musl 런타임 등)
+/build/
 
 # 컴파일된 라이브러리 및 실행 파일
 *.o

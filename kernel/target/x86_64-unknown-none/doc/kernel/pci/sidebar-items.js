@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["ADDR_PORT","DATA_PORT"],"fn":["bar_io_base","enable_io_and_busmaster","find_device","inb","inl","inw","mk_addr","outb","outl","outw","read16","read32","write16","write32"]};

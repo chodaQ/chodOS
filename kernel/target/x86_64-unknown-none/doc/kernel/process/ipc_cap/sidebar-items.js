@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["alloc_shared","append_shared","buffer_count","drop_shared","is_valid","read_shared","recv_cap","send_cap"],"static":["NEXT_CAP_ID","SHARED_BUFFERS"],"struct":["SharedBuffer"],"type":["CapId"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["Ext4Fs","SliceReadError","StaticSlice"],"type":["BoxedError"]};

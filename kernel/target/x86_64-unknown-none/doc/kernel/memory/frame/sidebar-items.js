@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["BITMAP_WORDS","MAX_FRAMES","PAGE_SIZE"],"fn":["alloc_contiguous","alloc_frame","free_frame","free_frame_count","init","is_free","set_free","set_used","total_usable_frames"],"static":["BITMAP","FREE_FRAMES","TOTAL_USABLE"]};

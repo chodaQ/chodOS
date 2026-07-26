@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["ETHERTYPE_ARP"],"fn":["build_frame","build_reply","build_request","parse"],"struct":["ArpPacket","ArpTable"]};

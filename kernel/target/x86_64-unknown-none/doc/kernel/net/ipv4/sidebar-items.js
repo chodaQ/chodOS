@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["ETHERTYPE_IPV4","PROTO_ICMP","PROTO_TCP","PROTO_UDP"],"fn":["build_header","parse_header"]};

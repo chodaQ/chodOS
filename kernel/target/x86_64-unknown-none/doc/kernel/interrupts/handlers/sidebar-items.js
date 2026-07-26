@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["after_user_demo","exception_handler","exception_name","irq_handler_keyboard","irq_handler_mouse","syscall_dispatch","timer_preempt","voluntary_yield"],"static":["PENDING_PKG_IDX","TICK","USER_EXIT_CODE","USER_SYSCALL_COUNT","syscall_kern_rsp","syscall_user_rsp"],"struct":["ExceptionFrame"]};

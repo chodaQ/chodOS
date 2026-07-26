@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["KERNEL_CODE_SEL","KERNEL_DATA_SEL","TSS_SEL","USER_CODE_SEL","USER_CS_RPL3","USER_DATA_SEL","USER_SS_RPL3"],"fn":["init","set_tss_rsp0"],"static":["GDT","TSS"],"struct":["Gdt","GdtPointer","Tss"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["HEAP_FRAMES"],"fn":["init"],"static":["ALLOCATOR"]};

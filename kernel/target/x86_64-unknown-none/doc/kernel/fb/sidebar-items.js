@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["CH","CURSOR_MAP","CW"],"fn":["clear","draw_char","draw_cursor","draw_text","fill_rect","height","init","put_pixel","read_pixel","rgb","width"],"static":["CURSOR_BG","CURSOR_PREV_X","CURSOR_PREV_Y","FB_ADDR","FB_B_SH","FB_G_SH","FB_HEIGHT","FB_PITCH","FB_R_SH","FB_WIDTH","FONT"]};

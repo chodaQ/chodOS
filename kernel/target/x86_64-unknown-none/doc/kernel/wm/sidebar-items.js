@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["BORDER","TITLE_H","WIN_COUNT","WIN_H","WIN_INIT_X","WIN_INIT_Y","WIN_TITLES","WIN_W"],"fn":["draw_taskbar_btn","on_click","on_drag","on_release","redraw_cursor","render_desktop","shell_content_origin","win_rect","win_window"],"static":["DRAG_OX","DRAG_OY","DRAG_WIN","WIN_VIS","WIN_X","WIN_Y"],"struct":["Rect","Window"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["NET_HDR_LEN","RX_BUF_COUNT","RX_BUF_SIZE","R_GUEST_FEATURES","R_MAC","R_STATUS","STATUS_ACK","STATUS_DRIVER","STATUS_DRIVER_OK","STATUS_FAILED","VIRTIO_NET_DEVICE","VIRTIO_VENDOR","VIRTQ_DESC_F_NEXT","VIRTQ_DESC_F_WRITE"],"fn":["build_arp_request","ethertype","outb","outl","parse_arp_reply"],"struct":["NetHdr","VirtioNet"]};

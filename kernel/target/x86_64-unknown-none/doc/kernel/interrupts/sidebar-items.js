@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["init","init_syscall","rdmsr","wrmsr"],"mod":["gdt","handlers","idt","pic"]};

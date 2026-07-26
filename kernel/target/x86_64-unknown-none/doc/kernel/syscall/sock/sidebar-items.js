@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["EAFNOSUPPORT","ECONNREFUSED","ENOTCONN","EOPNOTSUPP","EPROTONOSUPPORT"],"fn":["is_sock_fd","sys_accept","sys_bind","sys_connect","sys_getpeername","sys_getsockname","sys_getsockopt","sys_listen","sys_recvfrom","sys_recvmsg","sys_sendmsg","sys_sendto","sys_setsockopt","sys_shutdown","sys_socket"],"static":["SOCK_NEXT_FD"]};
