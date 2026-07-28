@@ -87,6 +87,23 @@ struct Gdt([u64; 7]);
 #[repr(C, packed)]
 struct GdtPointer { limit: u16, base: u64 }
 
+// ── NMI/#DF 전용 IST 스택 ────────────────────────────────────────────────
+//
+// NMI(벡터 2)는 x86에서 cli/IF=0로 절대 마스킹할 수 없는 유일한 인터럽트다.
+// IST 없이(=현재 스택 그대로) 처리하면, 인터럽트 게이트로 IF=0을 걸어둔
+// 임계 구간(예: isr32/isr64가 mov rsp,rax로 다음 프로세스 스택으로 전환한
+// 직후~iretq 직전) 한복판에 NMI가 끼어들어도 그 순간의 현재 rsp에 자기
+// 예외 프레임을 그대로 밀어넣는다 — 다음 프로세스의 저장된 레지스터
+// 프레임(특히 iretq 직전 CS 슬롯)을 덮어쓸 수 있다는 뜻이다.
+// (`#GP` 부팅 회귀 실험 36~40에서 "IF=0인데 뭔가 끼어든 것처럼 보인다"는
+// 관측이 있었는데, IF로 막을 수 없는 NMI가 정확히 그 설명에 들어맞는
+// 유일한 인터럽트라 실험 41에서 이 가설을 검증하기 위해 추가함.)
+// #DF(벡터 8, 더블 폴트)도 관례상 전용 스택을 준다 — 더블 폴트가 난
+// 시점엔 원래 스택 상태를 신뢰할 수 없기 때문(Linux/seL4 등 표준 관행).
+const NMI_DF_IST_STACK_SIZE: usize = 8192;
+static mut NMI_IST_STACK: [u8; NMI_DF_IST_STACK_SIZE] = [0; NMI_DF_IST_STACK_SIZE];
+static mut DF_IST_STACK:  [u8; NMI_DF_IST_STACK_SIZE] = [0; NMI_DF_IST_STACK_SIZE];
+
 static mut TSS: Tss = Tss {
     _reserved0: 0,
     rsp:        [0; 3],
@@ -131,6 +148,13 @@ pub fn init() {
 
         GDT.0[3] = tss_low;
         GDT.0[4] = tss_ptr >> 32;
+
+        // ── IST1 = NMI 전용 스택, IST2 = #DF 전용 스택 ─────────────────────
+        // idt.rs에서 벡터 2(NMI)는 ist=1, 벡터 8(#DF)은 ist=2로 등록한다.
+        let nmi_stack_top = (&raw const NMI_IST_STACK as u64) + NMI_DF_IST_STACK_SIZE as u64;
+        let df_stack_top  = (&raw const DF_IST_STACK  as u64) + NMI_DF_IST_STACK_SIZE as u64;
+        TSS.ist[0] = nmi_stack_top; // IST1
+        TSS.ist[1] = df_stack_top;  // IST2
 
         // ── GDTR 로드 ──────────────────────────────────────────────────────
         let gdtr = GdtPointer {

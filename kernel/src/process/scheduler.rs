@@ -111,7 +111,12 @@ pub enum SchedMode {
     Cfs = 1,
 }
 
-static SCHED_MODE: AtomicU8 = AtomicU8::new(SchedMode::WeightedPriority as u8);
+// 기본값 CFS(실험 44). CFS-1/CFS-2(실험 33/34)에서 WeightedPriority 대비
+// 레이턴시 약 2배 개선 + starvation이 FAIRNESS_FLOOR_TICKS 같은 별도
+// 안전장치 없이 구조적으로 해소됨을 확인 — 사용자 확인(2026-07-27)으로
+// 프로덕션 기본값을 CFS로 전환. WeightedPriority 코드는 비교/회귀용으로
+// 그대로 유지(런타임에 set_mode()로 되돌릴 수 있음).
+static SCHED_MODE: AtomicU8 = AtomicU8::new(SchedMode::Cfs as u8);
 
 pub fn set_mode(mode: SchedMode) {
     SCHED_MODE.store(mode as u8, AtomicOrdering::SeqCst);
@@ -327,7 +332,18 @@ impl Scheduler {
     /// 선점형 컨텍스트 스위치 (타이머 / voluntary_yield 공통 진입점).
     ///
     /// `is_voluntary`: true면 현재 프로세스의 voluntary_yields++, false면 forced_preempts++.
-    pub fn do_preempt(&mut self, current_rsp: u64, is_voluntary: bool) -> u64 {
+    /// 반환값: `(new_rsp, from_pid, to_pid, tick)`.
+    ///
+    /// `policy::on_switch()` 호출은 일부러 여기서 하지 않는다 — 이 메서드는
+    /// 살아있는 `&mut self`(전역 `SCHEDULER`에 대한 참조)를 쥔 채 실행 중인데,
+    /// `policy::on_switch()`가 내부적으로 `scheduler::set_priority()` 등을
+    /// 재진입 호출하면 그것들이 각자 `unsafe fn get()`으로 같은 전역에 대한
+    /// *두 번째* `&mut`을 새로 만들어버린다 — Rust aliasing 모델 위반(실험
+    /// 36에서 발견된 잠재 UB). 대신 이 메서드는 필요한 값만 반환하고,
+    /// 호출자(`preempt()`/`voluntary_preempt()`)가 `get().do_preempt(...)`
+    /// 문장이 끝나 `&mut Scheduler` 대여가 완전히 해제된 뒤에
+    /// `policy::on_switch()`를 호출한다.
+    pub fn do_preempt(&mut self, current_rsp: u64, is_voluntary: bool) -> (u64, Pid, Pid, u64) {
         let cur = self.current;
         let from_pid = self.processes[cur].pid;
         SWITCH_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -380,9 +396,8 @@ impl Scheduler {
         let tick = crate::interrupts::handlers::TICK.load(
             core::sync::atomic::Ordering::Relaxed
         );
-        crate::policy::on_switch(from_pid, to_pid, tick);
 
-        new_rsp
+        (new_rsp, from_pid, to_pid, tick)
     }
 
     /// 다음 실행할 프로세스를 weighted round-robin으로 선택 (ALPHA 5).
@@ -584,12 +599,19 @@ pub fn alloc_pid() -> Pid {
 /// 반환값: 다음 프로세스의 `preempt_rsp` (스위치 없으면 동일).
 /// 타이머 강제 선점 (forced_preempts++)
 pub fn preempt(current_rsp: u64) -> u64 {
-    unsafe { get().do_preempt(current_rsp, false) }
+    // do_preempt()가 반환한 뒤(=&mut Scheduler 대여가 끝난 뒤) on_switch를
+    // 호출 — on_switch가 재진입으로 scheduler::get()을 다시 부를 수 있으므로
+    // 이 시점엔 살아있는 &mut Scheduler가 없어야 한다 (실험 36 aliasing 수정).
+    let (new_rsp, from_pid, to_pid, tick) = unsafe { get().do_preempt(current_rsp, false) };
+    crate::policy::on_switch(from_pid, to_pid, tick);
+    new_rsp
 }
 
 /// 자발적 양보 (voluntary_yields++)
 pub fn voluntary_preempt(current_rsp: u64) -> u64 {
-    unsafe { get().do_preempt(current_rsp, true) }
+    let (new_rsp, from_pid, to_pid, tick) = unsafe { get().do_preempt(current_rsp, true) };
+    crate::policy::on_switch(from_pid, to_pid, tick);
+    new_rsp
 }
 
 /// PE-4: 전체 컨텍스트 스위치 횟수 (A/B 벤치마크 지표).

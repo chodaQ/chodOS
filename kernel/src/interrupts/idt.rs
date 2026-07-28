@@ -104,7 +104,11 @@ pub fn init() {
             isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31,
         ];
         for (vec, &stub) in stubs.iter().enumerate() {
-            IDT.0[vec].set(stub as *const () as u64, TRAP_GATE, 0);
+            // 벡터 2(NMI)는 IST1, 벡터 8(#DF)은 IST2 전용 스택을 쓴다
+            // (gdt.rs 참고 — NMI는 IF=0로 마스킹 안 되므로 임계 구간에
+            // 끼어들어도 현재 스택을 훼손하지 않도록 분리).
+            let ist = match vec { 2 => 1, 8 => 2, _ => 0 };
+            IDT.0[vec].set(stub as *const () as u64, TRAP_GATE, ist);
         }
 
         // ── 하드웨어 IRQ: 인터럽트 게이트 ────────────────────────────────
