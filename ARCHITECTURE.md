@@ -430,7 +430,7 @@ Tier 3 ⬜: io_uring, BPF, namespaces, cgroups, seccomp
 |-----------|------|------|
 | 1~3.7 | 부팅·메모리·협력형 스케줄러·GDT/IDT/PIC·페이징·VFS | ✅ |
 | ALPHA 1~7 | 선점형 스케줄러·Zero-copy IPC·Policy Engine·EMA+Aging | ✅ |
-| ALPHA 8~17 | ext4·VirtIO·TCP/IP·Linux Compat·ELF·Shell·패키지·GUI | ✅ |
+| ALPHA 8~17 | ext4·VirtIO·IPv4(ARP/ICMP/UDP)·Linux Compat·ELF·Shell·패키지·GUI | ✅ |
 | BETA 1~17 | Linux Compat 확장·SMP·프로세스 모델·파일시스템·mprotect·Demand Paging | ✅ |
 | BETA-X 1~7 | 동적 IPC fast path (관찰→생성→회수) | ✅ |
 | BETA-X-2 1~6 | Event Tracer·보안 안전장치·Switchless | ✅ |

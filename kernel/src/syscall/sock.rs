@@ -1,7 +1,7 @@
 //! BETA 3: socket syscall 스텁
 //!
-//! MuKernel은 커널 내부에 virtio-net + TCP/IP 스택이 있지만
-//! 유저스페이스 소켓 API는 아직 연결되지 않았음.
+//! 커널 내부에 virtio-net + IPv4 스택(ARP/ICMP/UDP)이 있지만
+//! 유저스페이스 소켓 API는 아직 연결되지 않았음. TCP는 미구현.
 //! 이 파일은 musl/glibc 프로그램이 네트워크 syscall을 호출할 때
 //! 크래시하지 않도록 의미 있는 errno를 반환한다.
 

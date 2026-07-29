@@ -742,9 +742,9 @@ pub extern "C" fn _start() -> ! {
     }
     serial_println!("--- ALPHA 11 demo complete ---\n");
 
-    // ── ALPHA 12: TCP/IP 네트워크 스택 ───────────────────────────────────────
+    // ── ALPHA 12: IPv4 네트워크 스택 (ARP/ICMP/UDP) ──────────────────────────
     serial_println!("===========================================");
-    serial_println!("  ALPHA 12: TCP/IP Network Stack");
+    serial_println!("  ALPHA 12: IPv4 Network Stack (ARP/ICMP/UDP)");
     serial_println!("  (ARP table + IPv4 + ICMP ping + UDP)");
     serial_println!("===========================================");
 
