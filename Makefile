@@ -29,6 +29,9 @@ PKG_ELFS    := $(SYSINFO_ELF) $(MUECHO_ELF) $(MUCAT_ELF) $(MULS_ELF) $(MUPWD_ELF
 # BETA 21: musl-linked 동적 바이너리 + 런타임
 MUSL_SO     := build/lib/ld-musl-x86_64.so.1
 DYN_HELLO   := build/dyn_hello.elf
+# 커널이 include_bytes!로 박아넣는 musl 정적 테스트 바이너리
+MUSL_HELLO  := build/musl_hello.elf
+MUSL_UNAME  := build/musl_uname.elf
 
 # ALPHA 17: 8x8 비트맵 폰트 바이너리 (scripts/gen_font.py 생성)
 FONT_BIN := build/font8x8.bin
@@ -69,13 +72,23 @@ all: $(ISO)
 #   - limine-uefi-cd.bin   : UEFI CD-ROM 부팅용 El Torito 이미지
 #   - BOOTX64.EFI          : UEFI x86_64 부트로더
 #   - BOOTIA32.EFI         : UEFI i386 부트로더 (32비트 UEFI용)
-$(LIMINE_DIR):
+# limine 부트로더 바이너리 배포본을 받아온다.
+#
+# 주의: 디렉토리($(LIMINE_DIR))가 아니라 그 안의 실제 파일을 타겟으로 삼는다.
+# 예전에는 디렉토리를 타겟으로 썼는데, limine이 중첩 git 저장소(gitlink)로
+# 잘못 커밋돼 있어서 저장소를 clone하면 "빈 limine 디렉토리"가 생겼고,
+# make가 디렉토리 존재만 보고 받아오기를 건너뛴 뒤 cp에서 실패했다
+# (CI 도입하며 발견). 파일을 기준으로 삼으면 내용이 없을 때 다시 받는다.
+$(LIMINE_DIR)/limine-bios.sys:
 	@echo "[limine] Fetching limine binary release..."
+	@rm -rf $(LIMINE_DIR)
 	git clone https://github.com/limine-bootloader/limine.git \
 		--branch=v8.x-binary \
 		--depth=1 \
 		$(LIMINE_DIR)
 	@echo "[limine] Done."
+
+$(LIMINE_DIR): $(LIMINE_DIR)/limine-bios.sys
 
 limine-fetch: $(LIMINE_DIR)
 
@@ -208,6 +221,43 @@ $(FONT_BIN): scripts/gen_font.py
 
 # ==================== BETA 21: musl 런타임 + 동적 바이너리 ====================
 
+# musl 정적 테스트 바이너리 (ALPHA 14 ELF 로더 / BETA 21 데모용).
+#
+# 이 두 파일은 커널이 include_bytes!로 컴파일 타임에 박아넣기 때문에
+# (kernel/src/pkg.rs, kernel/src/main.rs) 커널 빌드보다 반드시 먼저 있어야 한다.
+# 예전에는 생성 규칙 없이 로컬 build/ 안에만 존재해서, 저장소를 새로 clone하면
+# 커널이 아예 빌드되지 않는 상태였다 (CI 도입하면서 발견).
+#
+# musl-cross가 있으면 소스에서 직접 빌드하고, 없으면 저장소에 함께 커밋해 둔
+# 사전 빌드본을 사용한다 — 어느 환경에서든 clone 직후 빌드가 되도록.
+$(MUSL_HELLO): user/musl-test/hello.c user/musl-test/hello
+	@mkdir -p build
+	@MUSL_GCC=""; \
+	for c in x86_64-linux-musl-gcc /opt/homebrew/bin/x86_64-linux-musl-gcc; do \
+		if command -v $$c >/dev/null 2>&1; then MUSL_GCC=$$c; break; fi; \
+	done; \
+	if [ -n "$$MUSL_GCC" ]; then \
+		$$MUSL_GCC -static -o $(MUSL_HELLO) user/musl-test/hello.c; \
+		echo "[musl] $(MUSL_HELLO) 소스에서 빌드 완료"; \
+	else \
+		cp user/musl-test/hello $(MUSL_HELLO); \
+		echo "[musl] musl-cross 없음 → 사전 빌드본 사용: $(MUSL_HELLO)"; \
+	fi
+
+$(MUSL_UNAME): user/musl-test/uname_test.c user/musl-test/uname_test
+	@mkdir -p build
+	@MUSL_GCC=""; \
+	for c in x86_64-linux-musl-gcc /opt/homebrew/bin/x86_64-linux-musl-gcc; do \
+		if command -v $$c >/dev/null 2>&1; then MUSL_GCC=$$c; break; fi; \
+	done; \
+	if [ -n "$$MUSL_GCC" ]; then \
+		$$MUSL_GCC -static -o $(MUSL_UNAME) user/musl-test/uname_test.c; \
+		echo "[musl] $(MUSL_UNAME) 소스에서 빌드 완료"; \
+	else \
+		cp user/musl-test/uname_test $(MUSL_UNAME); \
+		echo "[musl] musl-cross 없음 → 사전 빌드본 사용: $(MUSL_UNAME)"; \
+	fi
+
 # musl .so: scripts/fetch_musl.sh가 빌드 (Alpine apk에서 추출)
 $(MUSL_SO):
 	@echo "[musl] musl 런타임 없음 → fetch_musl.sh 실행..."
@@ -215,7 +265,8 @@ $(MUSL_SO):
 	bash scripts/fetch_musl.sh
 
 # musl-linked 동적 테스트 바이너리
-$(DYN_HELLO): user/musl-test/hello_dyn_start.c $(MUSL_SO)
+# 폴백 경로에서 $(MUSL_HELLO)를 복사하므로 그것도 선행 조건이다.
+$(DYN_HELLO): user/musl-test/hello_dyn_start.c $(MUSL_SO) $(MUSL_HELLO)
 	@echo "[musl] 동적 바이너리 빌드 시도..."
 	@MUSL_GCC=""; \
 	for c in x86_64-linux-musl-gcc /opt/homebrew/bin/x86_64-linux-musl-gcc; do \
@@ -234,7 +285,7 @@ $(DYN_HELLO): user/musl-test/hello_dyn_start.c $(MUSL_SO)
 # ==================== 커널 빌드 ====================
 
 .PHONY: kernel
-kernel: $(ROOTFS_IMG) $(MUSHELL_ELF) $(PKG_ELFS) $(FONT_BIN)
+kernel: $(ROOTFS_IMG) $(MUSHELL_ELF) $(PKG_ELFS) $(FONT_BIN) $(MUSL_HELLO) $(MUSL_UNAME)
 	@echo "[cargo] Building kernel (x86_64-unknown-none, debug)..."
 	cd kernel && cargo build
 	@echo "[cargo] Build complete: $(KERNEL_ELF)"
@@ -258,7 +309,7 @@ $(KERNEL_ELF): kernel
 #         ├── BOOTX64.EFI     ← UEFI 부트로더 (x86_64)
 #         └── BOOTIA32.EFI    ← UEFI 부트로더 (i386)
 
-$(ISO): $(KERNEL_ELF) $(LIMINE_DIR) limine.conf
+$(ISO): $(KERNEL_ELF) $(LIMINE_DIR)/limine-bios.sys limine.conf
 	@echo "[iso] Creating ISO directory structure..."
 	mkdir -p $(ISO_DIR)/boot/limine
 	mkdir -p $(ISO_DIR)/EFI/BOOT

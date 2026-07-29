@@ -19,12 +19,42 @@ TMP_DIR="$BUILD_DIR/_musl_tmp"
 mkdir -p "$LIB_OUT" "$TMP_DIR"
 
 # ── Alpine musl apk 다운로드 + 추출 ──────────────────────────────────────────
+#
+# 주의: apk 파일명의 리비전(-rN)은 Alpine이 수시로 올린다. 예전에는
+# musl-1.2.5-r0.apk를 하드코딩했는데, Alpine이 r3으로 올리면서 404가 나
+# 저장소를 새로 clone한 환경에서 빌드가 통째로 실패했다(CI 도입하며 발견).
+# 그래서 파일명을 고정하지 않고 디렉토리 목록에서 현재 존재하는 것을 찾는다.
 
-ALPINE_VER="3.20"
-APK_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/main/x86_64/musl-1.2.5-r0.apk"
+ALPINE_VERSIONS="3.20 3.21 3.22"
 APK_FILE="$TMP_DIR/musl.apk"
 
+# 사용 가능한 musl apk URL을 찾는다. 실패하면 빈 문자열.
+find_musl_apk_url() {
+    for ver in $ALPINE_VERSIONS; do
+        base="https://dl-cdn.alpinelinux.org/alpine/v${ver}/main/x86_64"
+        # 디렉토리 목록에서 musl-<버전>-r<N>.apk 를 추출 (musl-dev 등은 제외)
+        name=$(curl -fsSL "$base/" 2>/dev/null \
+               | grep -oE 'musl-[0-9][0-9.]*-r[0-9]+\.apk' \
+               | sort -u | tail -1)
+        if [ -n "$name" ]; then
+            echo "$base/$name"
+            return 0
+        fi
+    done
+    return 1
+}
+
 if [ ! -f "$LIB_OUT/ld-musl-x86_64.so.1" ]; then
+    echo "[musl] Alpine 저장소에서 musl 패키지 탐색 중..."
+    APK_URL="$(find_musl_apk_url || true)"
+
+    if [ -z "$APK_URL" ]; then
+        echo "[musl] 오류: Alpine 저장소에서 musl apk를 찾지 못했습니다."
+        echo "       네트워크 연결을 확인하거나, musl 런타임을 직접 받아"
+        echo "       build/lib/ld-musl-x86_64.so.1 에 배치한 뒤 다시 실행하세요."
+        exit 1
+    fi
+
     echo "[musl] Alpine apk 다운로드: $APK_URL"
     curl -fsSL -o "$APK_FILE" "$APK_URL"
 

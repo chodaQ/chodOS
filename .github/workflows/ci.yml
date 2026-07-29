@@ -1,8 +1,14 @@
 name: CI
 
-# 커널이 항상 빌드되는 상태를 유지하기 위한 최소 검증.
-# rust-toolchain.toml에 nightly / rust-src / llvm-tools-preview /
-# x86_64-unknown-none 타겟이 고정돼 있어, rustup이 알아서 맞춰 설치한다.
+# 클린 체크아웃에서 커널이 실제로 빌드되는지를 검증한다.
+#
+# 중요: `cd kernel && cargo build`만 돌리면 안 된다. 커널이 include_bytes!로
+# build/ 안의 산출물(폰트, 패키지 ELF, musl 바이너리, rootfs.ext4)을 컴파일
+# 타임에 박아넣기 때문에, 그 선행 산출물을 만드는 `make kernel`을 거쳐야
+# 로컬 개발 환경이 아닌 곳에서도 재현된다. 이 워크플로의 첫 버전이 바로
+# 그 함정에 빠져 실패했고, 그 과정에서 clone 직후 빌드가 불가능한 문제
+# 세 가지(musl 바이너리 생성 규칙 누락, Alpine apk URL 404, limine gitlink)를
+# 찾아 고쳤다.
 
 on:
   push:
@@ -12,19 +18,24 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-kernel:
-    name: 커널 빌드 (x86_64-unknown-none)
+  build:
+    name: 클린 빌드 (x86_64-unknown-none)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml을 읽어 nightly + 컴포넌트 + 타겟 설치
-      - name: 툴체인 설치
+      - name: 빌드 의존 도구 설치
+        run: |
+          sudo apt-get update -qq
+          # e2fsprogs: rootfs.ext4 생성(mke2fs)
+          # xorriso:   부팅 ISO 생성
+          sudo apt-get install -y -qq e2fsprogs xorriso
+
+      - name: 툴체인 확인
         working-directory: kernel
         run: |
           rustup show active-toolchain
           rustc --version
-          cargo --version
 
       - name: 의존성 캐시
         uses: actions/cache@v4
@@ -36,23 +47,23 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('kernel/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: 커널 빌드 (debug)
-        working-directory: kernel
-        run: cargo build
+      # make kernel이 폰트/패키지 ELF/musl 바이너리/rootfs를 먼저 만든 뒤
+      # 커널을 빌드한다. 심사·검증 환경이 밟을 경로와 동일하다.
+      - name: 커널 빌드
+        run: make kernel
 
-      - name: 커널 빌드 (release)
-        working-directory: kernel
-        run: cargo build --release
+      - name: 부팅 ISO 빌드
+        run: make all
 
-      # 아카라이브/디스코드에서 "QEMU 환경 맞추기보다 ELF 하나 있으면 좋겠다"는
-      # 피드백을 받아, 빌드 산출물을 그대로 내려받을 수 있게 올린다.
-      - name: 커널 ELF 아티팩트 업로드
+      # "QEMU 환경을 직접 맞추기보다 ELF 하나 있으면 좋겠다"는 커뮤니티
+      # 요청에 따라, 빌드 산출물을 그대로 내려받을 수 있게 올린다.
+      - name: 빌드 산출물 업로드
         uses: actions/upload-artifact@v4
         with:
-          name: chodos-kernel-elf
+          name: chodos-build
           path: |
             kernel/target/x86_64-unknown-none/debug/kernel
-            kernel/target/x86_64-unknown-none/release/kernel
+            build/mukernel.iso
           if-no-files-found: error
 
   warnings:
@@ -63,9 +74,12 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - name: 경고 수집
-        working-directory: kernel
+      - name: 빌드 의존 도구 설치
         run: |
-          cargo build 2>&1 | tee build.log
-          echo "----- 경고 요약 -----"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs xorriso
+      - name: 경고 수집
+        run: |
+          make kernel 2>&1 | tee build.log
+          echo "----- 경고 개수 -----"
           grep -c '^warning' build.log || true

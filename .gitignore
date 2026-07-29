@@ -5,6 +5,11 @@ target/
 # make로 재생성되는 빌드 산출물 (ISO, ext4 이미지, musl 런타임 등)
 /build/
 
+# limine 부트로더 — `make limine-fetch`가 upstream에서 받아온다.
+# 예전에 중첩 git 저장소(gitlink)로 잘못 커밋돼 clone 시 빈 디렉토리만
+# 생기는 문제가 있었다. 추적 대상에서 제외하고 항상 받아쓰도록 한다.
+/limine/
+
 # 컴파일된 라이브러리 및 실행 파일
 *.o
 *.a
