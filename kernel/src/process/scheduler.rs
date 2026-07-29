@@ -111,12 +111,16 @@ pub enum SchedMode {
     Cfs = 1,
 }
 
-// 기본값 CFS(실험 44). CFS-1/CFS-2(실험 33/34)에서 WeightedPriority 대비
-// 레이턴시 약 2배 개선 + starvation이 FAIRNESS_FLOOR_TICKS 같은 별도
-// 안전장치 없이 구조적으로 해소됨을 확인 — 사용자 확인(2026-07-27)으로
-// 프로덕션 기본값을 CFS로 전환. WeightedPriority 코드는 비교/회귀용으로
-// 그대로 유지(런타임에 set_mode()로 되돌릴 수 있음).
-static SCHED_MODE: AtomicU8 = AtomicU8::new(SchedMode::Cfs as u8);
+// 기본값 WeightedPriority (실험 44에서 CFS로 바꿔봤다가 롤백 — 실험 45
+// 참고). CFS-1/CFS-2(실험 33/34) 벤치마크 자체는 유효하지만, CFS를
+// 기본값으로 켠 채 전체 데모를 완주시켜보니 BETA-X 3(WM↔GFX fast
+// channel)의 Policy Engine 승격 조건이 CFS의 타이머 선점 방식(quanta
+// 없이 매 틱마다 min-vruntime 재선택)과 상호작용해 fast channel이
+// 끝까지 승격되지 않고 무한정 일반 IPC 경로로만 도는 회귀를 발견 —
+// 힙 고갈로 OOM 패닉까지 이어짐. 이 상호작용의 근본 원인은 아직
+// 미해결이라, 안전하게 기본값을 원상복구했다. CFS는 계속
+// set_mode(SchedMode::Cfs)로 켤 수 있는 A/B 옵션으로 유지.
+static SCHED_MODE: AtomicU8 = AtomicU8::new(SchedMode::WeightedPriority as u8);
 
 pub fn set_mode(mode: SchedMode) {
     SCHED_MODE.store(mode as u8, AtomicOrdering::SeqCst);

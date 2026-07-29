@@ -2036,7 +2036,7 @@ pub extern "C" fn _start() -> ! {
 
     process::scheduler::set_mode(process::scheduler::SchedMode::Cfs);
     let sched_cfs = bench_pe4::run("CFS   ");
-    process::scheduler::set_mode(process::scheduler::SchedMode::Cfs); // 이후 데모 원복 (실험 44: 기본값 CFS로 전환)
+    process::scheduler::set_mode(process::scheduler::SchedMode::WeightedPriority); // 이후 데모 원복 (실험 45: CFS 기본값 시도 후 회귀 발견, 롤백)
 
     bench_pe4::report_ab_labeled(
         "CFS-1: 스케줄러 A/B 비교 결과 (WeightedPriority vs CFS)",
@@ -2069,7 +2069,7 @@ pub extern "C" fn _start() -> ! {
         process::scheduler::set_mode(process::scheduler::SchedMode::Cfs);
         cfs_trials[i] = bench_pe4::run("CFS   ");
     }
-    process::scheduler::set_mode(process::scheduler::SchedMode::Cfs); // 이후 데모 원복 (실험 44: 기본값 CFS로 전환)
+    process::scheduler::set_mode(process::scheduler::SchedMode::WeightedPriority); // 이후 데모 원복 (실험 45: CFS 기본값 시도 후 회귀 발견, 롤백)
 
     fn trial_stats(trials: &[(u64, u64, u64)]) -> (u64, u64, u64, u64, u64, u64) {
         let (mut lat_min, mut lat_max, mut lat_sum) = (u64::MAX, 0u64, 0u64);
@@ -2132,7 +2132,7 @@ pub extern "C" fn _start() -> ! {
     process::scheduler::kill_pid(sid4);
     process::scheduler::kill_pid(rid4);
     process::scheduler::reap_dead(); // 실험 35: 힙 자원 회수 (일반 컨텍스트)
-    process::scheduler::set_mode(process::scheduler::SchedMode::Cfs); // 이후 데모 원복 (실험 44: 기본값 CFS로 전환)
+    process::scheduler::set_mode(process::scheduler::SchedMode::WeightedPriority); // 이후 데모 원복 (실험 45: CFS 기본값 시도 후 회귀 발견, 롤백)
 
     serial_println!("[cfs2b] CFS 모드에서 starvation 워크로드 완료 — 300틱 대기 루프 정상 종료 (FAIRNESS_FLOOR 없이도 kernel_main이 굶지 않음)");
     serial_println!("--- CFS-2 complete ---\n");
