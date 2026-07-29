@@ -1,25 +1,10 @@
-# MuKernel — Minimalist, Efficient, and Self-Optimizing Operating System
-
-> "아치 리눅스의 자유도 + macOS의 편안함"을 **최종 목표**로 잡고 있는 Rust
-> 기반 마이크로커널 OS. 지금은 그 목표를 향한 커널 단계(부팅/메모리/
-> 스케줄러/IPC)이고, 완성된 데스크탑 경험을 흉내내고 있는 건 아니다.
+# chodOS — Self-Optimizing Operating System
 
 **현재 단계: ALPHA 1~17 완료 → BETA 1~15 완료 → BETA-X(동적 IPC 최적화) 완료**
 부팅 → 메모리 → 스케줄러 → IPC → ext4 → TCP/IP → Linux syscall → ELF 실행 →
 Shell → GUI(framebuffer 수준, 데스크탑 셸 아님) → fork/exec/시그널/스레딩까지
 end-to-end 동작 확인됨.
-BETA-X에서 밝혀진 핵심 발견: 마이크로커널 오버헤드의 진짜 정체는 "메시지
-복사 비용"이 아니라 "전환(컨텍스트 스위치) 비용"이었다 — 자세한 내용은
-`ARCHITECTURE.md` 참고.
 
-> **알려진 이슈 (업데이트됨):** 부팅 중 타이머/yield ISR의 `iretq`에서
-> 간헐적으로 발생하던 `#GP` fault가 있었다. QEMU 11.0.0 → 11.0.3 업데이트로
-> 재현이 사라졌고(실험 40), 추가로 **NMI/#DF에 전용 IST 스택을 분리**해
-> QEMU 버전에 의존하지 않는 커널 쪽 방어 조치도 넣었다(실험 41 — NMI는
-> `cli`로 못 막는 유일한 인터럽트라 임계 구간에 끼어들면 프레임을 덮어쓸
-> 수 있다는 가설). QEMU 11.0.0이 이미 삭제돼 이 조치가 실제 원인을 고친
-> 것인지 직접 A/B 검증은 못 했다 — "확정된 수정"이 아니라 "표준 관행
-> 기반 방어 조치 + 외부 QEMU 수정"의 이중 조합으로 정직하게 표시해둔다.
 > **QEMU 11.0.3 이상 사용을 권장.**
 
 ---
@@ -53,10 +38,6 @@ Linux  → sysctl, systemd, udev 직접 설정
 ### Event-Driven
 백그라운드 데몬 없음. 하드웨어 이벤트가 발생할 때만 CPU가 반응한다.
 
-> ⚠️ **자기 점검 노트:** 개발 중 한 번, Linux 호환 작업(fork/exec/시그널/동적
-> 링커/pacman 등)에 깊이 들어가다가 "Policy Engine 달린 Linux 클론"이 되어가는
-> 방향 이탈을 겪었다. Linux 호환은 아래 §3에서도 명시하듯 **Shim(도구)** 이지
-> 본체가 아니다. 이 문서의 §4(Policy Engine)가 항상 우선이라는 걸 잊지 말 것.
 
 ---
 

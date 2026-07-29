@@ -1,0 +1,36 @@
+name: 실험 제안
+description: 측정으로 확인해볼 가설을 제안합니다
+labels: ["experiment"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        이 저장소는 성능·동작에 관한 주장을 반드시 측정으로 확인하고
+        `EXPERIMENTS.md`에 기록합니다. 확인해볼 가치가 있는 가설을
+        제안해주세요.
+
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: 가설
+      description: 무엇이 참이라고 예상하며, 왜 그렇게 생각하나요
+      placeholder: "예: recv()를 블로킹으로 바꾸면 CFS 모드에서 소비자 기아가 사라질 것이다"
+    validations:
+      required: true
+
+  - type: textarea
+    id: method
+    attributes:
+      label: 측정 방법
+      description: 무엇을 어떻게 재면 가설을 확인/기각할 수 있나요
+      placeholder: "예: 생산자/소비자 프레임 카운트를 두 모드에서 비교, n=3"
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 예상 결과와 반증 조건
+      description: 어떤 결과가 나오면 가설이 틀린 것으로 봐야 하나요
+    validations:
+      required: true

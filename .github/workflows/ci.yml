@@ -1,0 +1,71 @@
+name: CI
+
+# 커널이 항상 빌드되는 상태를 유지하기 위한 최소 검증.
+# rust-toolchain.toml에 nightly / rust-src / llvm-tools-preview /
+# x86_64-unknown-none 타겟이 고정돼 있어, rustup이 알아서 맞춰 설치한다.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    name: 커널 빌드 (x86_64-unknown-none)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml을 읽어 nightly + 컴포넌트 + 타겟 설치
+      - name: 툴체인 설치
+        working-directory: kernel
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+
+      - name: 의존성 캐시
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kernel/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('kernel/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: 커널 빌드 (debug)
+        working-directory: kernel
+        run: cargo build
+
+      - name: 커널 빌드 (release)
+        working-directory: kernel
+        run: cargo build --release
+
+      # 아카라이브/디스코드에서 "QEMU 환경 맞추기보다 ELF 하나 있으면 좋겠다"는
+      # 피드백을 받아, 빌드 산출물을 그대로 내려받을 수 있게 올린다.
+      - name: 커널 ELF 아티팩트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: chodos-kernel-elf
+          path: |
+            kernel/target/x86_64-unknown-none/debug/kernel
+            kernel/target/x86_64-unknown-none/release/kernel
+          if-no-files-found: error
+
+  warnings:
+    name: 컴파일 경고 점검
+    runs-on: ubuntu-latest
+    # CLAUDE.md 규칙: "빌드 경고는 방치하지 않는다."
+    # 아직 정리 중인 경고가 남아 있어 실패로 처리하지 않고 리포트만 한다.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: 경고 수집
+        working-directory: kernel
+        run: |
+          cargo build 2>&1 | tee build.log
+          echo "----- 경고 요약 -----"
+          grep -c '^warning' build.log || true
