@@ -63,7 +63,7 @@ I/O 바운드와 CPU 바운드를 분류하고 우선순위·타임슬라이스�
 | | |
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 설계 원칙, 마일스톤, 로드맵 |
-| [EXPERIMENTS.md](EXPERIMENTS.md) | 40여 회 실험 원본 기록 (실패·반전 결과 포함) |
+| [EXPERIMENTS.md](EXPERIMENTS.md)   | 실험 원본 기록  |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 개발 환경, 기여 절차, 측정 기록 규칙 |
 
 
