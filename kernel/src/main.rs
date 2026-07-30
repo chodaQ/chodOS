@@ -1018,7 +1018,7 @@ pub extern "C" fn _start() -> ! {
     serial_println!("  read_va(RO_WIN): PTE_WRITABLE=0  (수신자 읽기 전용)");
     serial_println!("===========================================");
     {
-        let (write_va, read_va, phys) = unsafe { crate::paging::alloc_channel_frame() };
+        let (write_va, read_va, phys) = crate::paging::alloc_channel_frame();
 
         let wpte_ok = crate::paging::get_kernel_pte(write_va)
             .map(|p| p & 2 != 0)
@@ -1038,7 +1038,7 @@ pub extern "C" fn _start() -> ! {
         serial_println!("[beta-x2-3] W→R 왕복: write={:#x} read={:#x}  {}",
             ASYM_PATTERN, rb, if rb == ASYM_PATTERN { "✓" } else { "✗ FAIL" });
 
-        unsafe { crate::paging::free_channel_frame(phys); }
+        crate::paging::free_channel_frame(phys);
     }
     serial_println!("--- BETA-X-2 2/3 complete ---\n");
 
@@ -1442,7 +1442,7 @@ pub extern "C" fn _start() -> ! {
 
                 let a0=blk_ok[0]*100/25; let a1=blk_ok[1]*100/25;
                 let a2=blk_ok[2]*100/25; let a3=blk_ok[3]*100/25;
-                let tot=(blk_ok[0]+blk_ok[1]+blk_ok[2]+blk_ok[3]);
+                let tot=blk_ok[0]+blk_ok[1]+blk_ok[2]+blk_ok[3];
                 serial_println!("[ml3-conv]   {} │  {:3}%  {:3}%  {:3}%  {:3}% │ {:3}%",
                     sc_disp[sc], a0, a1, a2, a3, tot);
             }
@@ -1677,7 +1677,6 @@ pub extern "C" fn _start() -> ! {
                                 cold = cold.saturating_add(1);
                             }
                             rate_ema = (3*d*10 + 7*rate_ema)/10;
-                            let trend: i64 = if prev_d*10 > rate_ema {1} else {0};
                             dprev = d;
                             let ab = if a>=25{3}else if a>=10{2}else if a>=3{1}else{0};
                             let rb = if rate_ema/10>=21{2}else if rate_ema/10>=6{1}else{0};
@@ -1714,7 +1713,6 @@ pub extern "C" fn _start() -> ! {
                         let mut rate_ema: u64 = 0;
                         let mut cold: u8 = 0;
                         let mut dprev2: u64 = 0;
-                        let mut prev_s: usize = 0;
                         let mut action: u8 = 0;
                         for w in 0..10usize {
                             let d = deltas[w];
@@ -1745,7 +1743,6 @@ pub extern "C" fn _start() -> ! {
                             let mut best=0u8;let mut bq=q[ns][0];
                             for k in 1..4{if q[ns][k]>bq{bq=q[ns][k];best=k as u8;}}
                             action = best;
-                            prev_s = ns;
                         }
                     }
                     let eval_pct = eval_ok * 100 / 500;

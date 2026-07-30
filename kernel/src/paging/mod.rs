@@ -658,9 +658,16 @@ pub unsafe fn mmap_map(cr3: u64, vaddr: u64, data: &[u8], writable: bool) {
 }
 
 /// `cr3` 주소 공간에 `vaddr`부터 `count` 페이지를 0으로 익명 매핑.
+///
+/// `writable`이 false면 읽기 전용으로 매핑한다. 예전에는 이 인자를 받아놓고
+/// 무시한 채 항상 PTE_WRITABLE을 붙이고 있었다 — 읽기 전용을 요청해도 쓰기
+/// 가능한 매핑이 나오는 상태였다. 현재 유일한 호출자(sys_mmap의 MAP_FIXED
+/// anon 경로)가 true를 넘기므로 실제 동작은 달라지지 않지만, 인자가 약속한
+/// 대로 동작하도록 고쳤다.
+/// TODO: 호출부가 PROT_WRITE를 그대로 전달하도록 연결하는 것은 별도 작업.
 pub unsafe fn mmap_anon(cr3: u64, vaddr: u64, pages: usize, writable: bool) {
     let pml4 = table_at(cr3 & !0xFFF);
-    let flags = PTE_USER | PTE_WRITABLE;
+    let flags = if writable { PTE_USER | PTE_WRITABLE } else { PTE_USER };
     for i in 0..pages {
         let phys = crate::memory::frame::alloc_frame().expect("OOM: mmap_anon");
         let virt = (phys + hhdm_offset()) as *mut u8;

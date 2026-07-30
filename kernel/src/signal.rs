@@ -140,7 +140,12 @@ pub fn deliver_pending_signals(frame_rsp: u64) {
 
     let act = t[cur].as_ref().unwrap().sig_handlers[sig_idx];
     let flags = act.flags;
-    drop(t); // 이후 sys_exit_impl이 table을 잠글 수 있으므로 해제
+    // 여기서부터 t를 쓰지 않는다. table_pub()은 락 가드가 아니라 전역 static에
+    // 대한 &'static mut을 그대로 돌려주므로 "해제"할 락은 없다. 다만 아래
+    // 호출들(sys_exit_impl 등)이 같은 static에 대해 &mut을 새로 만들기 때문에,
+    // t를 계속 들고 있으면 이중 &mut 별칭이 된다 — 실험 43에서 정리한
+    // do_preempt/on_switch 문제와 같은 계열의 UB다. 이동시켜 재사용을 막는다.
+    let _ = t;
 
     match act.handler {
         SIG_DFL => {
