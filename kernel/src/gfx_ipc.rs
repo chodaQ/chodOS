@@ -88,7 +88,7 @@ pub fn gfx_task() -> ! {
 
         if processed > 0 {
             frames += 1;
-            if frames % 15 == 0 {
+            if frames % (15 * crate::DEMO_LOG_SCALE) == 0 {
                 crate::serial_println!(
                     "[gfx] frames={} fast_channels={}",
                     frames, ipc_fast::channel_count(),
@@ -154,7 +154,7 @@ pub fn wm_task() -> ! {
                 has_fast,
             );
         }
-        if frame > 0 && frame % 30 == 0 {
+        if frame > 0 && frame % (30 * crate::DEMO_LOG_SCALE) == 0 {
             crate::serial_println!(
                 "[wm-ipc] frame={} fast_channel={}",
                 frame,

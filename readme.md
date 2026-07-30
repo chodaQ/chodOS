@@ -14,13 +14,16 @@ Rust로 밑바닥부터 만드는 x86_64 마이크로커널. QEMU에서 부팅�
 brew install qemu xorriso e2fsprogs      # macOS
 rustup toolchain install nightly
 
-make run          # 시리얼 콘솔
+make run          # 시리얼 콘솔 / Quick 모드
 make run-gui      # GUI 창 포함
+make run-full	  # Full 모드
 ```
 
 * QEMU는 **11.0.3 이상** 권장 — 11.0.0에서 `iretq` `#GP` fault 재현 사례 ([실험 40~42](EXPERIMENTS.md))
 * 빌드 없이 받아보기: [Actions 아티팩트](https://github.com/chodaQ/chodOS/actions) (커널 ELF + 부팅 ISO)
-* 전체 데모 완주에 약 40분 (대부분 벤치마크 시간, 짧은 데모 모드 준비 중)
+* `make run`은 데모 워크로드를 줄인 quick 모드 — 셸까지 약 5분
+* `make run-full`은 전체 벤치마크 워크로드 — 약 41분. `EXPERIMENTS.md`에 기록된
+  수치를 재현할 때 사용 (quick 모드 출력값과 직접 비교 불가)
 
 
 ## 무엇이 동작하나

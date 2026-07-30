@@ -299,6 +299,34 @@ pub static MUSHELL_ELF: &[u8] = include_bytes!(
     concat!(env!("CARGO_MANIFEST_DIR"), "/../build/mushell.elf")
 );
 
+// ==================== 데모 워크로드 크기 ====================
+//
+// quick-demo 기능이 켜지면 데모용 대기 루프를 짧게 잡는다. 이 루프들은
+// Policy Engine이 리포트를 몇 번 돌릴 시간을 벌기 위한 것이라, 리포트
+// 주기(8~36틱)보다 충분히 길기만 하면 관측 목적은 유지된다.
+// (자세한 배경은 kernel/Cargo.toml의 [features] 주석 참고)
+#[cfg(feature = "quick-demo")]
+const DEMO_WAIT_TICKS: u64 = 120;
+#[cfg(not(feature = "quick-demo"))]
+const DEMO_WAIT_TICKS: u64 = 300;
+
+/// BETA-X 3/4 데모 태스크의 진행 로그 출력 간격에 곱하는 배수.
+///
+/// 이 두 데모는 yield 루프를 매우 빠르게 돌아 프레임/이벤트 수가 수십만까지
+/// 올라간다. 촘촘히 로그를 찍으면 시리얼 출력 자체가 병목이 된다 — 실측상
+/// 전체 로그 106,404줄 중 104,545줄(4.7MB)이 이 두 데모에서 나왔고, UART가
+/// 바이트당 수십 µs를 바쁜 대기로 소모하므로 출력에만 수 분이 걸렸다.
+/// (guest time만 보면 이 구간은 짧아서, 처음 부팅 시간을 분석할 때
+///  벤치마크만 범인으로 지목했다가 놓쳤던 두 번째 병목이다.)
+///
+/// 배수로 둔 이유: full 모드에서는 1이 되어 기존 로그 간격(15/30/20건)이
+/// 그대로 유지된다. 로그량이 타이밍에 영향을 줄 수 있어, 기존 실험을 돌렸던
+/// 조건을 바꾸지 않기 위함이다.
+#[cfg(feature = "quick-demo")]
+pub const DEMO_LOG_SCALE: u64 = 100;
+#[cfg(not(feature = "quick-demo"))]
+pub const DEMO_LOG_SCALE: u64 = 1;
+
 // ==================== 커널 진입점 ====================
 
 #[no_mangle]
@@ -311,6 +339,14 @@ pub extern "C" fn _start() -> ! {
     serial_println!("  MuKernel v0.1.0 - Milestone ALPHA");
     serial_println!("  Preemptive Sched + ZeroCopy IPC + Policy");
     serial_println!("===========================================");
+    // 벤치마크 수치를 EXPERIMENTS.md의 기록과 혼동하지 않도록 모드를 명시한다.
+    #[cfg(feature = "quick-demo")]
+    serial_println!(
+        "[demo] QUICK 모드 — 벤치마크 워크로드 축소됨. \
+         측정 수치는 EXPERIMENTS.md 기록과 비교 불가 (전체: make run-full)"
+    );
+    #[cfg(not(feature = "quick-demo"))]
+    serial_println!("[demo] FULL 모드 — 전체 벤치마크 워크로드 (약 41분 소요)");
     if let Some(info) = BOOTLOADER_INFO.response() {
         serial_println!("[boot] {} v{}", info.name(), info.version());
     }
@@ -454,7 +490,7 @@ pub extern "C" fn _start() -> ! {
     // ST-3의 Hysteresis(창당 ±1단계)가 baseline(게임모드)에서 빌드모드까지
     // 2단계 이동할 시간을 확보한다.
     let st3_start_tick = interrupts::handlers::TICK.load(Ordering::Relaxed);
-    while interrupts::handlers::TICK.load(Ordering::Relaxed) - st3_start_tick < 300 {
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - st3_start_tick < DEMO_WAIT_TICKS {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
     }
 
@@ -490,7 +526,7 @@ pub extern "C" fn _start() -> ! {
     // scheduler.rs의 FAIRNESS_FLOOR_TICKS(200틱 이상 대기 시 무조건 High로
     // 강제 승격)로 수정 완료 — 이 구간도 이제 정상 종료된다.
     let pe2_start_tick = interrupts::handlers::TICK.load(Ordering::Relaxed);
-    while interrupts::handlers::TICK.load(Ordering::Relaxed) - pe2_start_tick < 300 {
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - pe2_start_tick < DEMO_WAIT_TICKS {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
     }
 
@@ -514,7 +550,7 @@ pub extern "C" fn _start() -> ! {
     process::scheduler::spawn(process::Process::new(rid3, "receiver3", proc_receiver_sleepy));
 
     let e31_start_tick = interrupts::handlers::TICK.load(Ordering::Relaxed);
-    while interrupts::handlers::TICK.load(Ordering::Relaxed) - e31_start_tick < 300 {
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - e31_start_tick < DEMO_WAIT_TICKS {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
     }
 
@@ -2057,6 +2093,11 @@ pub extern "C" fn _start() -> ! {
     serial_println!("  CFS-2: 반복 시행(n=3) + starvation 재현 (실험 34)");
     serial_println!("===========================================");
 
+    // quick-demo에서는 반복 시행을 1회로 줄인다. 통계(min/avg/max)의 의미는
+    // 사라지지만 두 스케줄러가 동작한다는 것 자체는 그대로 보여준다.
+    #[cfg(feature = "quick-demo")]
+    const CFS2_TRIALS: usize = 1;
+    #[cfg(not(feature = "quick-demo"))]
     const CFS2_TRIALS: usize = 3;
     let mut wp_trials: [(u64, u64, u64); CFS2_TRIALS] = [(0, 0, 0); CFS2_TRIALS];
     let mut cfs_trials: [(u64, u64, u64); CFS2_TRIALS] = [(0, 0, 0); CFS2_TRIALS];
@@ -2125,7 +2166,7 @@ pub extern "C" fn _start() -> ! {
     process::scheduler::spawn(process::Process::new(rid4, "receiver4", proc_receiver));
 
     let cfs2b_start_tick = interrupts::handlers::TICK.load(Ordering::Relaxed);
-    while interrupts::handlers::TICK.load(Ordering::Relaxed) - cfs2b_start_tick < 300 {
+    while interrupts::handlers::TICK.load(Ordering::Relaxed) - cfs2b_start_tick < DEMO_WAIT_TICKS {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
     }
 

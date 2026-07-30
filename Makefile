@@ -59,7 +59,7 @@ DISK_IMG := build/disk.img
 
 # ==================== 기본 타겟 ====================
 
-.PHONY: all run run-gui clean limine-fetch kernel rootfs disk font
+.PHONY: all run run-full run-gui clean limine-fetch kernel rootfs disk font
 
 all: $(ISO)
 
@@ -284,10 +284,28 @@ $(DYN_HELLO): user/musl-test/hello_dyn_start.c $(MUSL_SO) $(MUSL_HELLO)
 
 # ==================== 커널 빌드 ====================
 
+# 데모 워크로드 크기를 정하는 cargo feature.
+#
+# 기본은 quick-demo — 전체 데모 완주가 41분이라 처음 받아본 사람이나
+# 시연 영상 촬영에는 쓸 수 없기 때문이다. 실측상 그 41분의 93%가
+# 벤치마크 워크로드였고 커널 기능 데모 자체는 167초였다.
+#
+#   make run        → quick (기본)
+#   make run-full   → 전체 워크로드 (EXPERIMENTS.md 수치 재현용)
+#
+# 모드를 바꾸면 cargo가 feature 변경을 감지해 커널을 다시 빌드한다.
+KERNEL_FEATURES ?= quick-demo
+CARGO_FEATURE_FLAG := $(if $(KERNEL_FEATURES),--features $(KERNEL_FEATURES),)
+
 .PHONY: kernel
 kernel: $(ROOTFS_IMG) $(MUSHELL_ELF) $(PKG_ELFS) $(FONT_BIN) $(MUSL_HELLO) $(MUSL_UNAME)
-	@echo "[cargo] Building kernel (x86_64-unknown-none, debug)..."
-	cd kernel && cargo build
+	@echo "[cargo] Building kernel (x86_64-unknown-none, debug, features=$(if $(KERNEL_FEATURES),$(KERNEL_FEATURES),none))..."
+	cd kernel && cargo build $(CARGO_FEATURE_FLAG)
+	@# cargo가 "fresh"로 판단해 바이너리를 다시 쓰지 않으면 ELF의 mtime이
+	@# 예전 그대로 남는다. 그러면 $(ISO)가 자기보다 오래된 ELF를 보고 갱신을
+	@# 건너뛰어, 소스를 고쳤는데도 낡은 커널이 든 ISO로 부팅하게 된다.
+	@# (실제로 이것 때문에 수정이 반영 안 된 ISO를 두 번 측정했다.)
+	@touch $(KERNEL_ELF)
 	@echo "[cargo] Build complete: $(KERNEL_ELF)"
 
 $(KERNEL_ELF): kernel
@@ -357,6 +375,11 @@ $(ISO): $(KERNEL_ELF) $(LIMINE_DIR)/limine-bios.sys limine.conf
 	@ls -lh $(ISO)
 
 # ==================== QEMU 실행 ====================
+
+## 전체 벤치마크 워크로드로 실행 (약 41분).
+## EXPERIMENTS.md에 기록된 수치를 재현할 때 사용한다.
+run-full:
+	$(MAKE) KERNEL_FEATURES= run
 
 ## UEFI 모드로 실행 (macOS에서 권장)
 run: $(ISO) $(DISK_IMG)

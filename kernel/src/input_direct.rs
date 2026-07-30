@@ -171,8 +171,8 @@ pub fn input_consumer_task() -> ! {
                 );
             }
 
-            // 20개마다 이벤트 내용 로그
-            if count % 20 == 0 {
+            // 일정 건수마다 이벤트 내용 로그 (quick 모드에서는 훨씬 드물게)
+            if count % (20 * crate::DEMO_LOG_SCALE) == 0 {
                 let val = u64::from_le_bytes([
                     msg.data[0], msg.data[1], msg.data[2], msg.data[3],
                     msg.data[4], msg.data[5], msg.data[6], msg.data[7],

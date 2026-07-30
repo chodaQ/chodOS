@@ -26,11 +26,36 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+/// 수집할 키 입력 레이턴시 표본 수.
+///
+/// run()은 이 개수를 다 채워야 정상 종료한다. PE=ON 조건에서는 컨텍스트
+/// 스위치가 폭증해 표본이 잘 안 쌓이고(실측 n=20/40) 아래 타임아웃까지
+/// 끌려가므로, 이 값이 실질적으로 벤치 1회의 소요 시간을 좌우한다.
+#[cfg(feature = "quick-demo")]
+pub const N_SAMPLES: usize = 10;
+#[cfg(not(feature = "quick-demo"))]
 pub const N_SAMPLES: usize = 40;
-/// cpu_hog가 채워야 하는 반복 횟수 — 부팅시간 대비 측정 유효성 균형.
+
+/// cpu_hog가 채워야 하는 반복 횟수.
+///
+/// 주의: 이 값은 부팅 시간에 거의 영향을 주지 않는다. 실측하면 hog는
+/// 4틱(약 0.2초) 만에 목표를 채우고(로그의 `hog완료=4tick`), 그 뒤로는
+/// 아래 N_SAMPLES 수집과 타임아웃이 시간을 지배한다. 데모 시간을 줄이려고
+/// 이 값을 건드려도 소용없다 — 실제로 1/10로 줄여봤지만 변화가 없었다.
 const HOG_TARGET_ITERS: u64 = 20_000_000;
+
 /// 키 입력 시뮬레이션 간격 (틱).
 const KEYPRESS_INTERVAL_TICKS: u64 = 3;
+
+/// 벤치 1회의 최대 대기 틱 (starvation 등으로 무한 대기 방지).
+///
+/// 타이머는 약 18틱/초이므로 4000틱은 20초가 아니라 **약 222초**다.
+/// PE=ON 실행은 표본을 다 못 채워 매번 이 한도까지 가고, 데모가 이
+/// 벤치를 10회 호출하므로 전체 부팅 41분의 대부분이 여기서 나왔다.
+#[cfg(feature = "quick-demo")]
+const BENCH_TIMEOUT_TICKS: u64 = 300;
+#[cfg(not(feature = "quick-demo"))]
+const BENCH_TIMEOUT_TICKS: u64 = 4000;
 
 pub static KBD_TRIGGER_TS: AtomicU64 = AtomicU64::new(0);
 static KBD_LATS: [AtomicU64; N_SAMPLES] = [const { AtomicU64::new(0) }; N_SAMPLES];
@@ -125,8 +150,7 @@ pub fn run(label: &str) -> (u64, u64, u64) {
         let kbd_done = KBD_IDX.load(Ordering::Relaxed) >= N_SAMPLES;
         if hog_done && kbd_done { break; }
 
-        // 타임아웃 (starvation 등으로 무한 대기 방지, ~20초분 틱)
-        if tick - start_tick > 4000 { break; }
+        if tick - start_tick > BENCH_TIMEOUT_TICKS { break; }
 
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)); }
     }
@@ -142,13 +166,26 @@ pub fn run(label: &str) -> (u64, u64, u64) {
     let hog_done_tick = CPU_HOG_DONE_TICK.load(Ordering::Relaxed);
     let hog_ticks = if hog_done_tick != 0 { hog_done_tick - start_tick } else { 0 };
 
-    crate::serial_println!(
-        "[pe4] {} 완료: kbd_lat_avg={}cy(n={})  ctx_switch/36tick={}  hog완료={}{}",
-        label, avg_lat, KBD_IDX.load(Ordering::Relaxed).min(N_SAMPLES),
-        switches_36,
-        if hog_done_tick != 0 { "" } else { "TIMEOUT " },
-        hog_ticks,
-    );
+    // 표본이 하나도 안 쌓이면 avg는 0이 되는데, 이걸 그냥 찍으면 "레이턴시
+    // 0사이클"이라는 잘못된 인상을 준다. 표본 부족을 명시적으로 구분한다.
+    let n_collected = KBD_IDX.load(Ordering::Relaxed).min(N_SAMPLES);
+    if n_collected == 0 {
+        crate::serial_println!(
+            "[pe4] {} 완료: 표본 없음 (레이턴시 측정 불가)  ctx_switch/36tick={}  hog완료={}{}",
+            label, switches_36,
+            if hog_done_tick != 0 { "" } else { "TIMEOUT " },
+            hog_ticks,
+        );
+    } else {
+        crate::serial_println!(
+            "[pe4] {} 완료: kbd_lat_avg={}cy(n={}{})  ctx_switch/36tick={}  hog완료={}{}",
+            label, avg_lat, n_collected,
+            if n_collected < N_SAMPLES { ", 표본부족" } else { "" },
+            switches_36,
+            if hog_done_tick != 0 { "" } else { "TIMEOUT " },
+            hog_ticks,
+        );
+    }
 
     crate::process::scheduler::kill_pid(hog_pid);
     crate::process::scheduler::kill_pid(kbd_pid);
