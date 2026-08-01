@@ -1,8 +1,4 @@
-# MuKernel — Architecture Design
-
-> "아치 리눅스의 자유도 + macOS의 편안함"
-> Rust no_std, x86_64, Limine UEFI
->
+# ARCHITECTURE.md
 > **현재 단계: ALPHA 완료 (1~17) → BETA 1~17 완료 → BETA-X 완료
 > → BETA-X-2 완료 → ML 1~4 완료 → Phase D 완료 → PE-1~5 완료
 > → Self-Tuning ST-1~4 완료 — 3중 안전장치 템플릿 4회 재사용, stale-slot

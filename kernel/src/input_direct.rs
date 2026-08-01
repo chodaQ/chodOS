@@ -223,11 +223,17 @@ pub fn key_gen_task() -> ! {
     crate::serial_println!("[key-gen] burst 150 이벤트 push 완료");
     scheduler::yield_now();
 
-    // Phase 2: 지속 생성
-    let mut i = 0usize;
+    // Phase 2: 지속 생성 — 버스트마다 1틱 쉬어 생산 속도를 타이머에 묶는다.
+    // (제한 없이 yield_now()를 돌리면 TCG가 포화되어 타이머 틱이 멈춘다.
+    //  자세한 배경은 crate::DEMO_BURST 주석 참고)
+    let mut i = 0u64;
     loop {
-        push_key(chars[i % len]);
+        push_key(chars[(i as usize) % len]);
         i += 1;
-        scheduler::yield_now();
+        if i % crate::DEMO_BURST == 0 {
+            scheduler::sleep_ticks(1);
+        } else {
+            scheduler::yield_now();
+        }
     }
 }
